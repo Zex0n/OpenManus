@@ -152,6 +152,11 @@ class MCPSettings(BaseModel):
             raise ValueError(f"Failed to load MCP server config: {e}")
 
 
+class BackendSettings(BaseModel):
+    host: str = Field("0.0.0.0", description="Backend host")
+    port: int = Field(5000, description="Backend port")
+
+
 class AppConfig(BaseModel):
     llm: Dict[str, LLMSettings]
     sandbox: Optional[SandboxSettings] = Field(
@@ -167,6 +172,7 @@ class AppConfig(BaseModel):
     run_flow_config: Optional[RunflowSettings] = Field(
         None, description="Run flow configuration"
     )
+    backend: Optional[BackendSettings] = Field(None, description="Backend API config")
 
     class Config:
         arbitrary_types_allowed = True
@@ -283,6 +289,10 @@ class Config:
             run_flow_settings = RunflowSettings(**run_flow_config)
         else:
             run_flow_settings = RunflowSettings()
+
+        backend_config = raw_config.get("backend", {})
+        backend_settings = BackendSettings(**backend_config) if backend_config else BackendSettings()
+
         config_dict = {
             "llm": {
                 "default": default_settings,
@@ -296,6 +306,7 @@ class Config:
             "search_config": search_settings,
             "mcp_config": mcp_settings,
             "run_flow_config": run_flow_settings,
+            "backend": backend_settings,
         }
 
         self._config = AppConfig(**config_dict)
@@ -325,6 +336,10 @@ class Config:
     def run_flow_config(self) -> RunflowSettings:
         """Get the Run Flow configuration"""
         return self._config.run_flow_config
+
+    @property
+    def backend(self) -> BackendSettings:
+        return self._config.backend
 
     @property
     def workspace_root(self) -> Path:

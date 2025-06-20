@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --radius: 0.625rem;
+}
+
+.dark {
+  --radius: 0.625rem;
+}
+
+@layer base {
+  * {
+    @apply border-gray-200 dark:border-gray-700 outline-none;
+  }
+
+  body {
+    @apply bg-white dark:bg-gray-900 text-gray-900 dark:text-white;
+  }
+}
