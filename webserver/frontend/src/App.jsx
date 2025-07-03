@@ -41,7 +41,7 @@ function App() {
     setIsLoading(true)
 
     try {
-      const apiUrl = '/api/chat'
+      const apiUrl = '/api/chat/stream'
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -52,44 +52,53 @@ function App() {
         })
       })
 
-      if (!response.ok) {
+      if (!response.ok || !response.body) {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
 
-      const data = await response.json()
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+      let stepIndex = 0
 
-      // Handling response with steps
-      if (Array.isArray(data.response)) {
-        // Add each step as a separate message
-        const botMessages = data.response.map((step, index) => ({
-          id: Date.now() + index,
-          text: step.content,
-          sender: 'bot',
-          timestamp: new Date()
-        }))
-
-        setMessages(prev => [...prev, ...botMessages])
-      } else {
-        // Backward compatibility for old responses
-        const botMessage = {
-          id: Date.now() + 1,
-          text: data.response || 'Sorry, could not get a response from the server.',
-          sender: 'bot',
-          timestamp: new Date()
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let lines = buffer.split('\n')
+        buffer = lines.pop() // последний неполный кусок оставляем в буфере
+        for (let line of lines) {
+          line = line.trim()
+          if (!line) continue
+          if (line.startsWith('data:')) {
+            try {
+              const data = JSON.parse(line.replace('data:', '').trim())
+              if (data && data.content) {
+                setMessages(prev => [
+                  ...prev,
+                  {
+                    id: Date.now() + stepIndex,
+                    text: data.content,
+                    sender: 'bot',
+                    timestamp: new Date()
+                  }
+                ])
+                stepIndex++
+              }
+            } catch (e) {
+              // ignore parse errors
+            }
+          }
         }
-
-        setMessages(prev => [...prev, botMessage])
       }
     } catch (error) {
       console.error('Error sending message:', error)
-
       const errorMessage = {
         id: Date.now() + 1,
-        text: `Connection error with the server: ${error.message}. Please check that the Flask server is running on port 5000.`,
+        text: `Ошибка соединения с сервером: ${error.message}. Проверьте, что Flask сервер запущен на порту 5000.`,
         sender: 'bot',
         timestamp: new Date()
       }
-
       setMessages(prev => [...prev, errorMessage])
     } finally {
       setIsLoading(false)

@@ -23,3 +23,21 @@ async def process_prompt(prompt: str) -> str:
         return f"Error processing prompt: {str(e)}"
     finally:
         await agent.cleanup()
+
+
+async def process_prompt_stream(prompt: str):
+    agent = await Manus.create()
+    try:
+        if not prompt.strip():
+            yield "Empty prompt provided"
+            return
+        yield "Processing your request..."
+        async for step in agent.run_stream(
+            prompt
+        ):  # run_stream должен быть async-генератором
+            yield step
+        yield "Request processing completed."
+    except Exception as e:
+        yield f"Error processing prompt: {str(e)}"
+    finally:
+        await agent.cleanup()

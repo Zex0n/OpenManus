@@ -3,11 +3,14 @@ import json
 import os
 from queue import Queue
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request, stream_with_context
 from flask_cors import cross_origin
 
 from app.config import config
-from webserver.backend.src.core.manus_processor import process_prompt
+from webserver.backend.src.core.manus_processor import (
+    process_prompt,
+    process_prompt_stream,
+)
 
 chat_bp = Blueprint("chat", __name__)
 
@@ -62,6 +65,32 @@ def chat():
 
     except Exception as e:
         return jsonify({"error": f"Server error: {str(e)}", "status": "error"}), 500
+
+
+from flask import Response, stream_with_context
+
+
+@chat_bp.route("/chat/stream", methods=["POST"])
+@cross_origin()
+def chat_stream():
+    data = request.get_json()
+    user_message = data.get("message", "").strip()
+    if not user_message:
+        return jsonify({"error": "Empty message"}), 400
+
+    def generate():
+        # Здесь обычный (НЕ async) генератор!
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        async_gen = process_prompt_stream(user_message)
+        try:
+            while True:
+                step = loop.run_until_complete(async_gen.__anext__())
+                yield f"data: {json.dumps({'type': 'step', 'content': step})}\n\n"
+        except StopAsyncIteration:
+            pass
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
 
 # @chat_bp.route("/chat/status", methods=["GET"])

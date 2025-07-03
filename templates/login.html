@@ -1,0 +1,26 @@
+<html>
+
+<head>
+    <title>Authorization</title>
+</head>
+
+<body>
+    <form method="post" onsubmit="return login(event)">
+        <input type="password" id="password" placeholder="Password" />
+        <button type="submit">Login</button>
+        <div id="login-error" style="color:red;"></div>
+    </form>
+    <script>
+        function login(e) {
+            e.preventDefault();
+            var pwd = document.getElementById('password').value;
+            fetch('/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) })
+                .then(r => r.json()).then(d => {
+                    if (d.success) { location.reload(); } else { document.getElementById('login-error').innerText = d.error; }
+                });
+            return false;
+        }
+    </script>
+</body>
+
+</html>

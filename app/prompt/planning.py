@@ -19,9 +19,9 @@ Know when to conclude - don't continue thinking once objectives are met.
 NEXT_STEP_PROMPT = """
 Based on the current state, what's your next action?
 Choose the most efficient path forward:
-1. Is the plan sufficient, or does it need refinement?
+1. Is the task complete? If so, use `terminate` tool immediately.
 2. Can you execute the next step immediately?
-3. Is the task complete? If so, use `finish` right away.
+3. Is the plan sufficient, or does it need refinement?
 
 Be concise in your reasoning, then select the appropriate tool or action.
 """
