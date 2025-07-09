@@ -1,26 +1,62 @@
 import asyncio
+import json
 import os
+import sqlite3
 import threading
 import tomllib
 import uuid
 import webbrowser
+from contextlib import contextmanager
 from datetime import datetime
 from functools import partial
 from json import dumps
 from pathlib import Path
 
-from fastapi import Body, FastAPI, HTTPException, Request, Cookie
+from fastapi import Body, Cookie, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
-    StreamingResponse,
     RedirectResponse,
+    StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+
+from app.database import add_task, get_all_tasks
+from app.database import get_task as db_get_task
+from app.database import init_db, update_task
+
+DB_PATH = "app_data.db"
+
+
+@contextmanager
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def init_db():
+    with get_db() as db:
+        db.execute(
+            """
+        CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY,
+            prompt TEXT,
+            created_at TEXT,
+            status TEXT,
+            steps TEXT,
+            result TEXT
+        )
+        """
+        )
 
 
 app = FastAPI()
@@ -62,6 +98,7 @@ class TaskManager:
         )
         self.tasks[task_id] = task
         self.queues[task_id] = asyncio.Queue()
+        add_task(task)
         return task
 
     async def update_task_step(
@@ -76,6 +113,7 @@ class TaskManager:
             await self.queues[task_id].put(
                 {"type": "status", "status": task.status, "steps": task.steps}
             )
+            update_task(task_id, status=task.status, steps=task.steps)
 
     async def complete_task(self, task_id: str):
         if task_id in self.tasks:
@@ -85,11 +123,19 @@ class TaskManager:
                 {"type": "status", "status": task.status, "steps": task.steps}
             )
             await self.queues[task_id].put({"type": "complete"})
+            # Сохраняем финальный результат (последний шаг типа result)
+            result = ""
+            for s in reversed(task.steps):
+                if s.get("type") == "result":
+                    result = s.get("result", "")
+                    break
+            update_task(task_id, status=task.status, steps=task.steps, result=result)
 
     async def fail_task(self, task_id: str, error: str):
         if task_id in self.tasks:
             self.tasks[task_id].status = f"failed: {error}"
             await self.queues[task_id].put({"type": "error", "message": error})
+            update_task(task_id, status=f"failed: {error}")
 
 
 task_manager = TaskManager()
@@ -100,7 +146,9 @@ SERVER_PASSWORD = None
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, auth: str = Cookie(default=None)):
     if auth != SERVER_PASSWORD:
-        return templates.TemplateResponse("login.html", {"request": request}, status_code=401)
+        return templates.TemplateResponse(
+            "login.html", {"request": request}, status_code=401
+        )
     return templates.TemplateResponse("index.html", {"request": request})
 
 
@@ -245,20 +293,29 @@ async def task_events(task_id: str):
 
 @app.get("/tasks")
 async def get_tasks():
-    sorted_tasks = sorted(
-        task_manager.tasks.values(), key=lambda task: task.created_at, reverse=True
-    )
+    db_tasks = get_all_tasks()
+    # steps/result могут быть сериализованы как строки, декодируем
+    for t in db_tasks:
+        try:
+            t["steps"] = json.loads(t["steps"]) if t["steps"] else []
+        except Exception:
+            t["steps"] = []
     return JSONResponse(
-        content=[task.model_dump() for task in sorted_tasks],
+        content=db_tasks,
         headers={"Content-Type": "application/json"},
     )
 
 
 @app.get("/tasks/{task_id}")
 async def get_task(task_id: str):
-    if task_id not in task_manager.tasks:
+    t = db_get_task(task_id)
+    if not t:
         raise HTTPException(status_code=404, detail="Task not found")
-    return task_manager.tasks[task_id]
+    try:
+        t["steps"] = json.loads(t["steps"]) if t["steps"] else []
+    except Exception:
+        t["steps"] = []
+    return t
 
 
 # @app.get("/config/status")
@@ -367,7 +424,9 @@ async def login(data: dict = Body(...)):
         response = JSONResponse({"success": True})
         response.set_cookie(key="auth", value=SERVER_PASSWORD, httponly=True)
         return response
-    return JSONResponse({"success": False, "error": "Incorrect password"}, status_code=401)
+    return JSONResponse(
+        {"success": False, "error": "Incorrect password"}, status_code=401
+    )
 
 
 if __name__ == "__main__":

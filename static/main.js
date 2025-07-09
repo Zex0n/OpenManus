@@ -2,63 +2,6 @@ let currentEventSource = null;
 
 let exampleApiKey = '';
 
-function checkConfigStatus() {
-    fetch('/config/status')
-        .then(response => response.json())
-        .then(data => {
-            const inputContainer = document.getElementById('input-container');
-            if (data.status === 'missing') {
-                showConfigModal(data.example_config);
-                inputContainer.classList.add('disabled');
-            } else if (data.status === 'no_example') {
-                alert('Error: Missing configuration example file! Please ensure that the config/config.example.toml file exists.');
-                inputContainer.classList.add('disabled');
-            } else {
-                inputContainer.classList.remove('disabled');
-            }
-        })
-        .catch(error => {
-            console.error('Configuration check failed:', error);
-            document.getElementById('input-container').classList.add('disabled');
-        });
-}
-
-// Display configuration pop-up and fill in sample configurations
-function showConfigModal(config) {
-    const configModal = document.getElementById('config-modal');
-    if (!configModal) return;
-
-    configModal.classList.add('active');
-
-    if (config) {
-        fillConfigForm(config);
-    }
-
-    const closeBtn = configModal.querySelector('.close-modal');
-    const cancelBtn = document.getElementById('cancel-config-btn');
-
-    function closeConfigModal() {
-        configModal.classList.remove('active');
-        document.getElementById('config-error').textContent = '';
-        document.querySelectorAll('.form-group.error').forEach(group => {
-            group.classList.remove('error');
-        });
-    }
-
-    if (closeBtn) {
-        closeBtn.onclick = closeConfigModal;
-    }
-
-    if (cancelBtn) {
-        cancelBtn.onclick = closeConfigModal;
-    }
-
-    const saveButton = document.getElementById('save-config-btn');
-    if (saveButton) {
-        saveButton.onclick = saveConfig;
-    }
-}
-
 // Use example configuration to fill in the form
 function fillConfigForm(exampleConfig) {
     if (exampleConfig.llm) {
@@ -378,6 +321,7 @@ function setupSSE(taskId) {
 }
 
 function loadHistory() {
+    console.log('loadHistory called');
     fetch('/tasks')
         .then(response => {
             if (!response.ok) {
@@ -391,20 +335,58 @@ function loadHistory() {
             const listContainer = document.getElementById('task-list');
             listContainer.innerHTML = tasks.map(task => `
             <div class="task-card" data-task-id="${task.id}">
-                <div>${task.prompt}</div>
+                <div class="task-prompt">${task.prompt}</div>
                 <div class="task-meta">
                     ${new Date(task.created_at).toLocaleString()} -
                     <span class="status status-${task.status ? task.status.toLowerCase() : 'unknown'}">
                         ${task.status || 'Unknown state'}
                     </span>
                 </div>
+                <div class="task-result-preview">
+                    ${task.result ? `<pre>${task.result.substring(0, 120)}${task.result.length > 120 ? '...' : ''}</pre>` : '<button class="show-details-btn">Details</button>'}
+                </div>
             </div>
         `).join('');
+            // Add click handler to task card
+            Array.from(listContainer.getElementsByClassName('task-card')).forEach(card => {
+                card.onclick = function () {
+                    const taskId = this.getAttribute('data-task-id');
+                    showTaskDetails(taskId);
+                };
+            });
         })
         .catch(error => {
             console.error('Failed to load history records:', error);
             const listContainer = document.getElementById('task-list');
             listContainer.innerHTML = `<div class="error">Load Fail: ${error.message}</div>`;
+        });
+}
+
+function showTaskDetails(taskId) {
+    fetch(`/tasks/${taskId}`)
+        .then(response => {
+            if (!response.ok) throw new Error('Failed to load task');
+            return response.json();
+        })
+        .then(task => {
+            const container = document.getElementById('task-container');
+            let html = `<div class="task-details">
+                <h2>Task</h2>
+                <div><b>Prompt:</b> <pre>${task.prompt}</pre></div>
+                <div><b>Status:</b> ${task.status}</div>
+                <div><b>Created:</b> ${new Date(task.created_at).toLocaleString()}</div>
+                <h3>Result</h3>
+                <pre>${task.result || 'No result'}</pre>
+                <h3>Steps</h3>
+                <div class="task-steps">${(task.steps || []).map((step, idx) => `
+                    <div class="task-step"><b>${step.type || 'step'} #${step.step ?? idx}:</b><pre>${step.result}</pre></div>
+                `).join('')}</div>
+            </div>`;
+            container.innerHTML = html;
+        })
+        .catch(error => {
+            const container = document.getElementById('task-container');
+            container.innerHTML = `<div class="error">Error: ${error.message}</div>`;
         });
 }
 
@@ -669,7 +651,7 @@ print("Hello from Python Simulated environment!")
 }
 
 function isAuthorized() {
-    return document.cookie.split(';').some(c => c.trim().startsWith('auth='));
+    return document.cookie.split(';').map(c => c.trim()).some(c => c.startsWith('auth='));
 }
 
 function logout() {
@@ -678,39 +660,7 @@ function logout() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    if (!isAuthorized()) {
-        return;
-    }
-    // Check configuration status on startup
-    checkConfigStatus();
-
     loadHistory();
-
-    const configButton = document.getElementById('config-button');
-    if (configButton) {
-        configButton.addEventListener('click', () => {
-            fetch('/config/status')
-                .then(response => response.json())
-                .then(data => {
-                    console.log(data);
-                    if (data.status === 'exists' && data.config) {
-                        showConfigModal(data.config);
-                    } else if (data.status === 'missing' && data.example_config) {
-                        showConfigModal(data.example_config);
-                    } else if (data.status === 'no_example') {
-                        alert('Error: Missing configuration example file! Please ensure that the config/config.example.toml file exists.');
-                    } else if (data.status === 'error') {
-                        alert('Configuration error: ' + data.message);
-                    } else {
-                        alert('Unable to load configuration. Please check if config.example.toml exists.');
-                    }
-                })
-                .catch(error => {
-                    console.error('Failed to fetch configuration:', error);
-                    alert('Failed to load configuration. Please check if the server is running and try again.');
-                });
-        });
-    }
 
     document.getElementById('prompt-input').addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -757,6 +707,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     });
+
 });
 
 function isConfigRequired() {

@@ -172,7 +172,7 @@ function getCurrentLanguage() {
 
 function setLanguage(lang) {
     localStorage.setItem('language', lang);
-    updatePageContent(lang);
+    // updatePageContent(lang);
 }
 
 function updatePageContent(lang) {
@@ -212,10 +212,10 @@ function updatePageContent(lang) {
 
 document.addEventListener('DOMContentLoaded', () => {
     const currentLang = getCurrentLanguage();
-    document.getElementById('language-select').value = currentLang;
-    updatePageContent(currentLang);
+    // document.getElementById('language-select').value = currentLang;
+    // updatePageContent(currentLang);
 
-    document.getElementById('language-select').addEventListener('change', (e) => {
-        setLanguage(e.target.value);
-    });
+    // document.getElementById('language-select').addEventListener('change', (e) => {
+    //     setLanguage(e.target.value);
+    // });
 });
