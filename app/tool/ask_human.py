@@ -1,4 +1,4 @@
-from app.tool import BaseTool
+from app.tool.base import BaseTool
 
 
 class AskHuman(BaseTool):
