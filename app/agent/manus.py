@@ -1,5 +1,5 @@
-from typing import Dict, List, Optional
 from datetime import datetime
+from typing import Dict, List, Optional
 
 from pydantic import Field, model_validator
 
@@ -14,6 +14,7 @@ from app.tool.browser_use_tool import BrowserUseTool
 from app.tool.file_saver import FileSaver
 from app.tool.google_search import GoogleSearch
 from app.tool.mcp import MCPClients, MCPClientTool
+from app.tool.ozon_tool import OzonTool
 from app.tool.python_execute import PythonExecute
 from app.tool.str_replace_editor import StrReplaceEditor
 
@@ -22,11 +23,13 @@ class Manus(ToolCallAgent):
     """A versatile general-purpose agent with support for both local and MCP tools."""
 
     name: str = "Manus"
-    description: str = "A versatile agent that can solve various tasks using multiple tools including MCP-based tools"
+    description: str = (
+        "A versatile agent that can solve various tasks using multiple tools including MCP-based tools"
+    )
 
     system_prompt: str = SYSTEM_PROMPT.format(
         directory=config.workspace_root,
-        current_date=datetime.now().strftime('%Y-%m-%d')
+        current_date=datetime.now().strftime("%Y-%m-%d"),
     )
     next_step_prompt: str = NEXT_STEP_PROMPT
 
@@ -41,6 +44,7 @@ class Manus(ToolCallAgent):
         default_factory=lambda: ToolCollection(
             PythonExecute(),
             BrowserUseTool(),
+            OzonTool(),
             # StrReplaceEditor(),
             AskHuman(),
             Terminate(),
@@ -144,6 +148,9 @@ class Manus(ToolCallAgent):
         if self._initialized:
             await self.disconnect_mcp_server()
             self._initialized = False
+
+        # Call parent cleanup to handle all tools (including OzonTool)
+        await super().cleanup()
 
     async def think(self) -> bool:
         """Process current state and decide next actions with appropriate context."""
