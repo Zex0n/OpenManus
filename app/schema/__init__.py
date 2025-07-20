@@ -185,3 +185,19 @@ class Memory(BaseModel):
     def to_dict_list(self) -> List[dict]:
         """Convert messages to list of dicts"""
         return [msg.to_dict() for msg in self.messages]
+
+
+# Import marketplace schemas
+from app.schema.marketplace import (
+    AnalysisResult,
+    ExtractedProduct,
+    ExtractedReview,
+    FilterGroup,
+    FilterOption,
+    MarketplaceStructure,
+    NavigationStructure,
+    ProductPageStructure,
+    ProductStructure,
+    ReviewStructure,
+    SearchStructure,
+)

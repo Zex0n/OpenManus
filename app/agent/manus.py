@@ -13,6 +13,7 @@ from app.tool.ask_human import AskHuman
 from app.tool.browser_use_tool import BrowserUseTool
 from app.tool.file_saver import FileSaver
 from app.tool.google_search import GoogleSearch
+from app.tool.marketplace_analyzer import MarketplaceAnalyzer
 from app.tool.mcp import MCPClients, MCPClientTool
 from app.tool.ozon_tool import OzonTool
 from app.tool.python_execute import PythonExecute
@@ -45,6 +46,7 @@ class Manus(ToolCallAgent):
             PythonExecute(),
             BrowserUseTool(),
             OzonTool(),
+            MarketplaceAnalyzer(),
             # StrReplaceEditor(),
             AskHuman(),
             Terminate(),

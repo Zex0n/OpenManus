@@ -764,3 +764,16 @@ class LLM:
         except Exception as e:
             logger.error(f"Unexpected error in ask_tool: {e}")
             raise
+
+
+def get_llm(config_name: str = "default") -> LLM:
+    """
+    Utility function to get an LLM instance
+
+    Args:
+        config_name: Name of the configuration to use
+
+    Returns:
+        LLM instance
+    """
+    return LLM(config_name)
