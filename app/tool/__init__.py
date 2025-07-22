@@ -7,8 +7,8 @@ from app.tool.browser_use_tool import BrowserUseTool
 from app.tool.create_chat_completion import CreateChatCompletion
 from app.tool.file_saver import FileSaver
 from app.tool.google_search import GoogleSearch
+from app.tool.marketplace_analyzer import MarketplaceAnalyzer
 from app.tool.mcp import MCPClients, MCPClientTool
-from app.tool.ozon_tool import OzonTool
 from app.tool.planning import PlanningTool
 from app.tool.python_execute import PythonExecute
 from app.tool.str_replace_editor import StrReplaceEditor
@@ -30,9 +30,9 @@ __all__ = [
     "CreateChatCompletion",
     "FileSaver",
     "GoogleSearch",
+    "MarketplaceAnalyzer",
     "MCPClientTool",
     "MCPClients",
-    "OzonTool",
     "PlanningTool",
     "PythonExecute",
     "StrReplaceEditor",

@@ -15,13 +15,12 @@ SYSTEM_PROMPT = (
     "Log in and maintain authentication state to perform browser automation on behalf of the user\n"
     "You have various tools at your disposal that you can call upon to efficiently complete complex requests. Whether it's programming, information retrieval, file processing, web browsing, or human interaction (only for extreme cases), you can handle it all.\n"
     "\n"
-    "SPECIAL INSTRUCTIONS FOR OZON.RU:\n"
-    "- For ANY tasks related to OZON.RU, ОЗОН or ozon.ru ALWAYS use ONLY ozon_tool\n"
-    "- ozon_tool has built-in anti-bot bypass and is optimized for OZON site structure\n"
-    "- DO NOT use browser_use_tool for OZON tasks - use ONLY ozon_tool!\n"
-    "- If the request mentions price, don't add it to the search query, search only for the needed keyword! Filter by price after getting the product list!\n"
-    "- ozon_tool supports: product search, review analysis, getting product information\n"
-    "- MANDATORY: After finishing work with OZON use ozon_tool with action='close' to close the browser\n"
+    "SPECIAL INSTRUCTIONS FOR MARKETPLACES:\n"
+    "- For ANY tasks related to OZON.RU, Wildberries, or other marketplaces ALWAYS use marketplace_analyzer\n"
+    "- marketplace_analyzer is a universal tool that uses LLM to analyze ANY marketplace structure\n"
+    "- marketplace_analyzer supports: automatic structure analysis, product search, review analysis, product comparison\n"
+    "- It works with OZON, Wildberries, AliExpress, Amazon, eBay and ANY other online marketplaces\n"
+    "- MANDATORY: After finishing marketplace work use marketplace_analyzer with action='close' to close the browser\n"
     "\n"
     "Accomplish open-ended objectives through step-by-step iteration in a Turing-complete, networked environment\n"
     "Avoid asking the user questions whenever possible. Solve tasks independently within the planning proccess. If the task is completed, do not invent additional actions that the user did not request. Once the task is solved, use the 'terminate' tool to terminate immediately.\n"
@@ -86,13 +85,14 @@ SYSTEM_PROMPT = (
 NEXT_STEP_PROMPT = """
 Based on user needs, proactively select the most appropriate tool or combination of tools. For complex tasks, you can break down the problem and use different tools step by step to solve it. After using each tool, clearly explain the execution results and suggest the next steps.
 
-IMPORTANT for OZON tasks:
-- If the request mentions OZON/ОЗОН/products from ozon.ru - use ONLY ozon_tool
-- DO NOT use browser_use_tool for OZON tasks!
-- ozon_tool: {"action": "search", "query": "product up to XXXX rubles"} for search
-- ozon_tool: {"action": "get_reviews", "product_url": "URL"} for reviews
-- ozon_tool: {"action": "close"} MANDATORY at the end to close browser
-- ALWAYS finish OZON work by closing the browser!
+IMPORTANT for marketplace tasks:
+- If the request mentions ANY marketplaces (OZON, Wildberries, Amazon, etc.) - use ONLY marketplace_analyzer
+- DO NOT use browser_use_tool for marketplace tasks!
+- marketplace_analyzer: {"action": "analyze_page", "url": "marketplace_url"} to analyze structure
+- marketplace_analyzer: {"action": "search_products", "url": "marketplace_url", "query": "product", "max_results": 5} for search
+- marketplace_analyzer: {"action": "get_reviews", "product_url": "URL"} for reviews
+- marketplace_analyzer: {"action": "close"} MANDATORY at the end to close browser
+- ALWAYS finish marketplace work by closing the browser!
 
 If you want to stop the interaction at any point, use the `terminate` tool/function call.
 """

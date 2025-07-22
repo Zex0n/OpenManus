@@ -15,7 +15,6 @@ from app.tool.file_saver import FileSaver
 from app.tool.google_search import GoogleSearch
 from app.tool.marketplace_analyzer import MarketplaceAnalyzer
 from app.tool.mcp import MCPClients, MCPClientTool
-from app.tool.ozon_tool import OzonTool
 from app.tool.python_execute import PythonExecute
 from app.tool.str_replace_editor import StrReplaceEditor
 
@@ -45,7 +44,6 @@ class Manus(ToolCallAgent):
         default_factory=lambda: ToolCollection(
             PythonExecute(),
             BrowserUseTool(),
-            OzonTool(),
             MarketplaceAnalyzer(),
             # StrReplaceEditor(),
             AskHuman(),
@@ -151,7 +149,7 @@ class Manus(ToolCallAgent):
             await self.disconnect_mcp_server()
             self._initialized = False
 
-        # Call parent cleanup to handle all tools (including OzonTool)
+        # Call parent cleanup to handle all tools (including MarketplaceAnalyzer)
         await super().cleanup()
 
     async def think(self) -> bool:

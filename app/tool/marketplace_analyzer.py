@@ -211,15 +211,24 @@ Features:
         page = await self._ensure_browser_ready()
 
         try:
-            # Navigate to page
-            await page.goto(url, wait_until="networkidle", timeout=30000)
-            await asyncio.sleep(3)
+            # Navigate to page with extended timeout
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            logger.info("Page loaded, waiting for JavaScript content...")
+
+            # Wait for network to settle
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            await asyncio.sleep(5)
+
+            # Scroll to trigger lazy loading and wait for content
+            await self._ensure_content_loaded(page)
 
             # Get HTML content
             html_content = await page.content()
+            logger.info(f"Original HTML length: {len(html_content)} characters")
 
             # Clean HTML for analysis (remove unnecessary parts)
             cleaned_html = self._clean_html_for_analysis(html_content)
+            logger.info(f"Cleaned HTML length: {len(cleaned_html)} characters")
 
             # Analyze with LLM
             analysis_result = await self._analyze_html_with_llm(url, cleaned_html)
@@ -258,40 +267,115 @@ Features:
             logger.error(f"Structure analysis error: {e}")
             return ToolResult(error=f"Analysis error: {str(e)}")
 
+    async def _ensure_content_loaded(self, page: Page) -> None:
+        """Ensures JavaScript content is fully loaded"""
+        try:
+            # Scroll down and up to trigger lazy loading
+            await page.evaluate("window.scrollTo(0, 1000)")
+            await asyncio.sleep(2)
+            await page.evaluate("window.scrollTo(0, 2000)")
+            await asyncio.sleep(2)
+            await page.evaluate("window.scrollTo(0, 0)")
+            await asyncio.sleep(2)
+
+            # Wait for common marketplace elements to appear
+            common_selectors = [
+                "[data-widget]",
+                ".product-card",
+                ".goods-tile",
+                "[data-testid]",
+                ".catalog-product",
+                "input[type='search']",
+                "input[placeholder*='поиск']",
+                "input[placeholder*='search']",
+            ]
+
+            for selector in common_selectors:
+                try:
+                    await page.wait_for_selector(selector, timeout=5000)
+                    logger.info(f"Found element: {selector}")
+                    break
+                except:
+                    continue
+
+            # Additional wait for any pending requests
+            await asyncio.sleep(3)
+
+        except Exception as e:
+            logger.warning(f"Content loading check failed: {e}")
+
     def _clean_html_for_analysis(self, html: str) -> str:
-        """Cleans HTML for LLM analysis"""
-        # Remove scripts and styles
+        """Cleans HTML for LLM analysis with improved preservation of structure"""
+        logger.info(f"Starting HTML cleaning, original size: {len(html)}")
+
+        # Remove only script contents, but keep script tags for data attributes
         html = re.sub(
-            r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE
+            r"<script[^>]*>(.*?)</script>",
+            lambda m: (
+                f"<script{m.group(0)[7:m.group(0).index('>')]}></script>"
+                if ">" in m.group(0)
+                else m.group(0)
+            ),
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
         )
+
+        # Remove style contents but keep style tags
         html = re.sub(
-            r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE
+            r"<style[^>]*>(.*?)</style>",
+            lambda m: (
+                f"<style{m.group(0)[6:m.group(0).index('>')]}></style>"
+                if ">" in m.group(0)
+                else m.group(0)
+            ),
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
         )
 
         # Remove comments
         html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
 
-        # Remove extra whitespace
-        html = re.sub(r"\s+", " ", html)
+        # Preserve important whitespace but remove excessive
+        html = re.sub(r"\n\s*\n", "\n", html)
+        html = re.sub(r"[ \t]+", " ", html)
 
-        # Limit size (take first 15000 characters)
-        if len(html) > 15000:
-            html = html[:15000] + "..."
+        # Significantly increase limit for modern SPAs
+        max_size = 80000  # Increased from 15000 to 80000
+        if len(html) > max_size:
+            # Try to keep the most important parts
+            # Look for body content
+            body_match = re.search(
+                r"<body[^>]*>(.*)</body>", html, re.DOTALL | re.IGNORECASE
+            )
+            if body_match:
+                body_content = body_match.group(1)
+                if len(body_content) <= max_size:
+                    html = f"<html><body>{body_content}</body></html>"
+                else:
+                    # Take first part of body
+                    html = f"<html><body>{body_content[:max_size-50]}...</body></html>"
+            else:
+                html = html[:max_size] + "..."
 
+        logger.info(f"HTML cleaning completed, final size: {len(html)}")
         return html.strip()
 
     async def _analyze_html_with_llm(self, url: str, html: str) -> AnalysisResult:
         """Analyzes HTML using LLM to determine structure"""
 
         prompt = f"""
-Analyze the HTML code of a marketplace page and determine its structure.
+You are an expert web scraper analyzing a marketplace page. Analyze the HTML code carefully and identify all interactive elements.
 
 Page URL: {url}
 
-HTML code:
+HTML code (JavaScript-rendered content):
 {html}
 
-IMPORTANT: Determine the page type and return selectors only for elements that are actually present on the page.
+CRITICAL INSTRUCTIONS:
+1. This HTML contains JavaScript-rendered content from a modern SPA marketplace
+2. Look for data-* attributes, class names with modern naming conventions
+3. Pay special attention to React/Vue component patterns
+4. Identify elements that may have been dynamically created
 
 PAGE TYPES:
 - main: main page (may not contain product lists)
@@ -299,49 +383,51 @@ PAGE TYPES:
 - search: search results page (should contain product lists)
 - product: individual product page
 
-FOR EACH PAGE TYPE FIND THE FOLLOWING ELEMENTS (IF THEY EXIST):
+MODERN MARKETPLACE PATTERNS TO LOOK FOR:
 
 1. SEARCH (usually present on all pages):
-   - Search input field
-   - Search button (if there's a separate button)
-   - Search form
+   - Input with placeholders like "Поиск", "Search", "Найти товары"
+   - Common patterns: input[type="search"], input[placeholder*="поиск"], [data-widget*="search"]
+   - May be inside forms or standalone with buttons
 
 2. PRODUCTS IN LIST (only for category/search):
-   - Single product container
-   - Product title
-   - Product price
-   - Product link
-   - Product image
-   - Rating (if present)
-   - Discount (if present)
+   - Container patterns: [data-widget*="searchResults"], [data-widget*="products"], .product-card, .goods-tile
+   - Title patterns: usually in links <a href="/product/...">, may have classes like .title, .name
+   - Price patterns: often have gradient backgrounds, classes with "price", may use special Unicode spaces
+   - OZON specific: [data-widget="searchResultsV2"], span with background-image gradients for prices
+   - Wildberries: .product-card structures
+   - Look for data-testid attributes
 
 3. PRODUCT PAGE (only for product):
-   - Product title
-   - Product price
-   - Description
-   - Specifications
-   - Images
-   - Availability
+   - H1 tags for titles
+   - Price containers with special styling
+   - Description blocks with [data-widget] or .description classes
 
 4. FILTERS (if present):
-   - Filter groups with their options
+   - Often in sidebar containers
+   - Checkbox/radio groups for categories, price ranges
+   - May use [data-widget*="filter"] patterns
 
 5. NAVIGATION (if present):
-   - Pagination
-   - Next/previous page buttons
+   - Pagination with .pagination, .pager classes
+   - Next/prev buttons may have "next", "prev" in classes or data attributes
 
 6. REVIEWS (if present):
-   - Reviews container
-   - Individual review
-   - Review text
-   - Review rating
-   - Review author
+   - Review containers: [data-widget*="review"], .review, .feedback
+   - Individual reviews with ratings, text content
 
-RULES:
-- If element is NOT FOUND on the page, use null
-- Be precise with CSS selectors
-- Study HTML structure carefully
-- For main page, product lists may be absent - this is normal
+ANALYSIS RULES:
+- If element is NOT FOUND on the page, use null - DO NOT GUESS
+- Prefer data-* attributes and modern CSS selectors
+- Look for actual existing elements in the provided HTML
+- Pay attention to marketplace-specific patterns (Ozon, Wildberries, etc.)
+- Modern SPAs often use component-based class names and data attributes
+
+IMPORTANT: Study the actual HTML structure provided. Look for:
+- [data-widget] attributes (common in Ozon)
+- [data-testid] attributes (common in modern React apps)
+- Component-based class names
+- Dynamically generated content
 
 Return result STRICTLY in JSON format:
 
@@ -417,17 +503,64 @@ IMPORTANT:
             llm = get_llm()
             response = await llm.ask([{"role": "user", "content": prompt}])
 
-            # Extract JSON from response
-            json_match = re.search(r"\{.*\}", response, re.DOTALL)
-            if not json_match:
+            logger.info(f"LLM response length: {len(response)} characters")
+            logger.debug(f"LLM response preview: {response[:200]}...")
+
+            # Try multiple methods to extract JSON from response
+            result_data = None
+
+            # Method 1: Look for JSON between triple backticks
+            json_match = re.search(
+                r"```json\s*(\{.*?\})\s*```", response, re.DOTALL | re.IGNORECASE
+            )
+            if json_match:
+                try:
+                    result_data = json.loads(json_match.group(1))
+                    logger.info("Successfully parsed JSON from code block")
+                except json.JSONDecodeError:
+                    pass
+
+            # Method 2: Look for any JSON object in response
+            if not result_data:
+                json_match = re.search(r"\{.*\}", response, re.DOTALL)
+                if json_match:
+                    try:
+                        result_data = json.loads(json_match.group())
+                        logger.info("Successfully parsed JSON from response body")
+                    except json.JSONDecodeError:
+                        pass
+
+            # Method 3: Try to find JSON within larger blocks
+            if not result_data:
+                # Look for JSON starting with specific patterns
+                patterns = [
+                    r'"success":\s*true.*?\}',
+                    r'"success":\s*false.*?\}',
+                    r'"marketplace_structure".*?\}\s*\}',
+                ]
+
+                for pattern in patterns:
+                    match = re.search(r"\{.*?" + pattern, response, re.DOTALL)
+                    if match:
+                        try:
+                            result_data = json.loads(match.group())
+                            logger.info(
+                                f"Successfully parsed JSON using pattern: {pattern[:20]}..."
+                            )
+                            break
+                        except json.JSONDecodeError:
+                            continue
+
+            if not result_data:
+                logger.error(
+                    f"Failed to extract JSON from LLM response: {response[:500]}..."
+                )
                 return AnalysisResult(
                     success=False,
                     error_message="LLM did not return valid JSON",
                     confidence=0.0,
                     page_type="unknown",
                 )
-
-            result_data = json.loads(json_match.group())
 
             # Create AnalysisResult from JSON
             analysis_result = AnalysisResult(**result_data)
@@ -512,6 +645,9 @@ IMPORTANT:
             await page.wait_for_load_state("networkidle", timeout=30000)
             await asyncio.sleep(5)  # Additional time for JavaScript content loading
 
+            # Ensure search results are loaded
+            await self._ensure_content_loaded(page)
+
             # IMPORTANT: Re-analyze search results page structure
             # since it may differ from the main page
             logger.info("Re-analyzing search results page structure...")
@@ -558,13 +694,16 @@ IMPORTANT:
                 )
 
             # Extract products with updated structure
+            logger.info(
+                f"Attempting product extraction with structure: {search_structure.product.container_selector}"
+            )
             products = await self._extract_products_with_structure(
                 page, search_structure, max_results
             )
 
             if not products:
                 # If no products found, try alternative extraction methods
-                logger.info(
+                logger.warning(
                     "Standard extraction yielded no results, trying alternative methods..."
                 )
                 products = await self._extract_products_alternative_methods(
@@ -594,17 +733,23 @@ IMPORTANT:
         try:
             # Check if product container selector exists
             if not structure.product.container_selector:
-                logger.warning("Product container selector not defined")
+                logger.warning("Product container selector not defined in structure")
                 return []
+
+            logger.info(
+                f"Looking for products using selector: {structure.product.container_selector}"
+            )
 
             # Find product containers
             product_containers = await page.query_selector_all(
                 structure.product.container_selector
             )
 
+            logger.info(f"Found {len(product_containers)} product containers")
+
             if not product_containers:
                 logger.warning(
-                    f"No products found by selector: {structure.product.container_selector}"
+                    f"No products found by primary selector: {structure.product.container_selector}"
                 )
                 # Try alternative selectors
                 alternative_selectors = [

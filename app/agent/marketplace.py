@@ -254,3 +254,90 @@ class MarketplaceAgent(ToolCallAgent):
             f"Maximum {max_results_per_site} products from each site. "
             f"Compare prices, quality and conditions between different marketplaces"
         )
+
+    # Convenient methods adapted from OzonAgent for better usability
+    async def search_products_simple(
+        self, marketplace_url: str, query: str, max_results: int = 10
+    ) -> str:
+        """
+        Simple product search method
+
+        Args:
+            marketplace_url: Marketplace URL
+            query: Search query
+            max_results: Maximum number of results
+
+        Returns:
+            Search results
+        """
+        return await self.run(
+            f"Search for '{query}' on {marketplace_url} (maximum {max_results} results)"
+        )
+
+    async def analyze_product_reviews_simple(
+        self, product_url: str, max_reviews: int = 20
+    ) -> str:
+        """
+        Simple product review analysis method
+
+        Args:
+            product_url: Product URL
+            max_reviews: Maximum number of reviews
+
+        Returns:
+            Review analysis
+        """
+        return await self.run(
+            f"Analyze reviews for product: {product_url} (maximum {max_reviews} reviews)"
+        )
+
+    async def get_product_details(self, product_url: str) -> str:
+        """
+        Get detailed product information
+
+        Args:
+            product_url: Product URL
+
+        Returns:
+            Detailed product information
+        """
+        return await self.run(f"Get detailed information about product: {product_url}")
+
+    async def compare_products_by_urls_simple(self, product_urls: List[str]) -> str:
+        """
+        Simple product comparison by URLs
+
+        Args:
+            product_urls: List of product URLs for comparison
+
+        Returns:
+            Product comparison
+        """
+        products_list = "\n".join([f"- {url}" for url in product_urls])
+        return await self.run(f"Compare the following products:\n{products_list}")
+
+    async def find_best_product(
+        self,
+        marketplace_url: str,
+        query: str,
+        criteria: str = "price and reviews",
+        max_price: Optional[int] = None,
+    ) -> str:
+        """
+        Find best product by criteria
+
+        Args:
+            marketplace_url: Marketplace URL
+            query: Search query
+            criteria: Selection criteria
+            max_price: Maximum price limit
+
+        Returns:
+            Best product recommendation
+        """
+        request = f"Find the best product for query '{query}' on {marketplace_url}"
+        if max_price:
+            request += f" with price up to {max_price}"
+        request += f" considering criteria: {criteria}"
+
+        return await self.run(request)
