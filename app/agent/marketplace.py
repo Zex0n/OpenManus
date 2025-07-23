@@ -3,6 +3,7 @@ from typing import List, Optional
 from pydantic import Field
 
 from app.agent.toolcall import ToolCallAgent
+from app.config import Config, MarketplaceSettings
 from app.tool import Terminate, ToolCollection
 from app.tool.marketplace_analyzer import MarketplaceAnalyzer
 
@@ -61,6 +62,17 @@ class MarketplaceAgent(ToolCallAgent):
         "Universal agent for working with any marketplaces. "
         "Uses LLM for automatic site structure analysis."
     )
+
+    # Configuration fields
+    config: Config = Field(default_factory=Config, exclude=True)
+    marketplace_config: MarketplaceSettings = Field(default=None, exclude=True)
+
+    def __init__(self, **kwargs):
+        if "config" not in kwargs:
+            kwargs["config"] = Config()
+        if "marketplace_config" not in kwargs:
+            kwargs["marketplace_config"] = kwargs["config"].marketplace_config
+        super().__init__(**kwargs)
 
     system_prompt: str = MARKETPLACE_SYSTEM_PROMPT
     next_step_prompt: str = (
@@ -188,18 +200,25 @@ class MarketplaceAgent(ToolCallAgent):
 
         return await self.run(request)
 
-    async def analyze_product_reviews(self, product_url: str) -> str:
+    async def analyze_product_reviews(
+        self, product_url: str, max_reviews: int = None
+    ) -> str:
         """
         Specific product review analysis
 
         Args:
             product_url: Product URL
+            max_reviews: Maximum number of reviews to extract
 
         Returns:
             Review analysis and recommendations
         """
+        if max_reviews is None:
+            max_reviews = self.marketplace_config.default_max_reviews
+
         return await self.run(
             f"Analyze reviews for product {product_url}. "
+            f"Extract up to {max_reviews} reviews. "
             f"Highlight main pros and cons, assess product reliability"
         )
 
@@ -275,7 +294,7 @@ class MarketplaceAgent(ToolCallAgent):
         )
 
     async def analyze_product_reviews_simple(
-        self, product_url: str, max_reviews: int = 20
+        self, product_url: str, max_reviews: int = None
     ) -> str:
         """
         Simple product review analysis method
@@ -287,6 +306,9 @@ class MarketplaceAgent(ToolCallAgent):
         Returns:
             Review analysis
         """
+        if max_reviews is None:
+            max_reviews = self.marketplace_config.default_max_reviews
+
         return await self.run(
             f"Analyze reviews for product: {product_url} (maximum {max_reviews} reviews)"
         )
@@ -341,3 +363,29 @@ class MarketplaceAgent(ToolCallAgent):
         request += f" considering criteria: {criteria}"
 
         return await self.run(request)
+
+    async def extract_many_reviews(
+        self, product_url: str, max_reviews: int = None
+    ) -> str:
+        """
+        Extract a large number of reviews for detailed analysis
+
+        Args:
+            product_url: Product URL
+            max_reviews: Maximum number of reviews to extract (up to limit)
+
+        Returns:
+            Large collection of reviews
+        """
+        if max_reviews is None:
+            # For "many reviews" use double the default amount
+            max_reviews = min(
+                self.marketplace_config.default_max_reviews * 2,
+                self.marketplace_config.max_reviews_limit,
+            )
+
+        return await self.run(
+            f"Extract as many reviews as possible for product {product_url}. "
+            f"Target: {max_reviews} reviews. Use all available methods to load more reviews "
+            f"(pagination, scroll loading, etc.). Focus on quantity while maintaining quality."
+        )

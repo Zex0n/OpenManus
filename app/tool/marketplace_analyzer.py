@@ -7,6 +7,7 @@ from urllib.parse import urljoin, urlparse
 from playwright.async_api import Page, async_playwright
 from pydantic import Field
 
+from app.config import Config, MarketplaceSettings
 from app.llm import get_llm
 from app.logger import logger
 from app.schema.marketplace import (
@@ -34,6 +35,17 @@ Features:
 - Review collection
 - Working with filters
 - Page navigation"""
+
+    # Configuration fields
+    config: Config = Field(default_factory=Config)
+    marketplace_config: MarketplaceSettings = Field(default=None)
+
+    def __init__(self, **data):
+        if "config" not in data:
+            data["config"] = Config()
+        if "marketplace_config" not in data:
+            data["marketplace_config"] = data["config"].marketplace_config
+        super().__init__(**data)
 
     parameters: dict = {
         "type": "object",
@@ -69,8 +81,13 @@ Features:
             },
             "max_results": {
                 "type": "integer",
-                "description": "Maximum number of results (default 10)",
-                "default": 10,
+                "description": f"Maximum number of results (default {Config().marketplace_config.default_max_results})",
+                "default": Config().marketplace_config.default_max_results,
+            },
+            "max_reviews": {
+                "type": "integer",
+                "description": f"Maximum number of reviews to extract (default {Config().marketplace_config.default_max_reviews})",
+                "default": Config().marketplace_config.default_max_reviews,
             },
             "page_number": {
                 "type": "integer",
@@ -97,7 +114,8 @@ Features:
         query: Optional[str] = None,
         product_url: Optional[str] = None,
         filters: Optional[Dict] = None,
-        max_results: int = 10,
+        max_results: int = None,
+        max_reviews: int = None,
         page_number: int = 1,
         **kwargs,
     ) -> ToolResult:
@@ -111,9 +129,22 @@ Features:
             product_url: Product URL
             filters: Filters
             max_results: Maximum number of results
+            max_reviews: Maximum number of reviews
             page_number: Page number
         """
         try:
+            # Set default values from config if not provided
+            if max_results is None:
+                max_results = self.marketplace_config.default_max_results
+            if max_reviews is None:
+                max_reviews = self.marketplace_config.default_max_reviews
+
+            # Validate limits
+            if max_reviews > self.marketplace_config.max_reviews_limit:
+                logger.warning(
+                    f"Requested {max_reviews} reviews, but limit is {self.marketplace_config.max_reviews_limit}. Using limit."
+                )
+                max_reviews = self.marketplace_config.max_reviews_limit
             if action == "analyze_page":
                 if not url:
                     return ToolResult(error="URL is required for page analysis")
@@ -136,7 +167,7 @@ Features:
                     return ToolResult(
                         error="Product URL is required for review retrieval"
                     )
-                return await self._get_reviews(product_url)
+                return await self._get_reviews(product_url, max_reviews)
 
             elif action == "apply_filters":
                 if not filters:
@@ -173,7 +204,7 @@ Features:
         self._playwright = await async_playwright().start()
 
         self._browser = await self._playwright.chromium.launch(
-            headless=False,  # Show browser for debugging
+            headless=self.marketplace_config.headless_browser,  # Use config setting
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
@@ -212,11 +243,17 @@ Features:
 
         try:
             # Navigate to page with extended timeout
-            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=self.marketplace_config.page_load_timeout + 15000,
+            )
             logger.info("Page loaded, waiting for JavaScript content...")
 
             # Wait for network to settle
-            await page.wait_for_load_state("networkidle", timeout=30000)
+            await page.wait_for_load_state(
+                "networkidle", timeout=self.marketplace_config.page_load_timeout
+            )
             await asyncio.sleep(5)
 
             # Scroll to trigger lazy loading and wait for content
@@ -1036,7 +1073,11 @@ IMPORTANT:
         page = await self._ensure_browser_ready()
 
         try:
-            await page.goto(product_url, wait_until="networkidle", timeout=30000)
+            await page.goto(
+                product_url,
+                wait_until="networkidle",
+                timeout=self.marketplace_config.page_load_timeout,
+            )
             await asyncio.sleep(3)
 
             # Extract product information
@@ -1187,43 +1228,53 @@ IMPORTANT:
             logger.error(f"Error extracting product information: {e}")
             return f"Information extraction error: {str(e)}"
 
-    async def _get_reviews(self, product_url: str) -> ToolResult:
+    async def _get_reviews(self, product_url: str, max_reviews: int = 50) -> ToolResult:
         """Gets product reviews"""
         logger.info(f"Getting reviews for product: {product_url}")
-
-        # Determine structure for domain
-        domain = urlparse(product_url).netloc
-        structure = self._analyzed_structures.get(domain)
-
-        if not structure or not structure.reviews:
-            return ToolResult(error="Reviews structure not defined for this site")
 
         page = await self._ensure_browser_ready()
 
         try:
-            await page.goto(product_url, wait_until="networkidle", timeout=30000)
+            await page.goto(
+                product_url,
+                wait_until="networkidle",
+                timeout=self.marketplace_config.page_load_timeout,
+            )
             await asyncio.sleep(3)
 
-            # Find reviews link or extract reviews directly from page
-            if structure.reviews.reviews_link_selector:
-                # Navigate to reviews page
-                reviews_link = await page.query_selector(
-                    structure.reviews.reviews_link_selector
-                )
-                if reviews_link:
-                    href = await reviews_link.get_attribute("href")
-                    if href:
-                        reviews_url = urljoin(product_url, href)
-                        await page.goto(
-                            reviews_url, wait_until="networkidle", timeout=30000
-                        )
-                        await asyncio.sleep(3)
+            # Прокручиваем страницу для загрузки всех элементов
+            await self._ensure_content_loaded(page)
 
-            # Extract reviews
-            reviews = await self._extract_reviews_with_structure(page, structure)
+            # Находим ссылку на отзывы, используя улучшенную логику
+            reviews_url = await self._find_reviews_link(page, product_url)
+
+            if not reviews_url:
+                return ToolResult(error="Reviews link not found on product page")
+
+            logger.info(f"Found reviews URL: {reviews_url}")
+
+            # Переходим на страницу отзывов
+            await page.goto(
+                reviews_url,
+                wait_until="networkidle",
+                timeout=self.marketplace_config.page_load_timeout,
+            )
+            await asyncio.sleep(5)  # Больше времени для загрузки отзывов
+
+            # Прокручиваем страницу отзывов для загрузки контента
+            await self._ensure_content_loaded(page)
+
+            # Загружаем дополнительные отзывы если их много
+            await self._load_more_reviews(page, max_reviews)
+
+            # Дополнительное ожидание для JavaScript-рендеринга отзывов
+            await asyncio.sleep(3)
+
+            # Извлекаем отзывы используя улучшенную логику
+            reviews = await self._extract_reviews_improved(page, max_reviews)
 
             if not reviews:
-                return ToolResult(error="Reviews not found")
+                return ToolResult(error="Reviews not found on reviews page")
 
             return ToolResult(
                 output=f"Found reviews: {len(reviews)}\n\n" + "\n---\n".join(reviews)
@@ -1555,6 +1606,370 @@ IMPORTANT:
             logger.error(f"Alternative extraction error: {e}")
 
         return products
+
+    async def _find_reviews_link(self, page: Page, product_url: str) -> Optional[str]:
+        """Находит ссылку на отзывы на странице товара используя LLM"""
+        try:
+            logger.info("Поиск ссылки на отзывы с помощью LLM...")
+
+            # Получаем HTML контент страницы
+            html_content = await page.content()
+            cleaned_html = self._clean_html_for_analysis(html_content)
+
+            # Анализируем HTML с помощью LLM для поиска ссылки на отзывы
+            reviews_link = await self._find_reviews_link_with_llm(
+                product_url, cleaned_html
+            )
+
+            if reviews_link:
+                # Проверяем, что ссылка валидна и делаем её абсолютной
+                if reviews_link.startswith("/"):
+                    reviews_link = urljoin(product_url, reviews_link)
+                elif not reviews_link.startswith("http"):
+                    reviews_link = urljoin(product_url, reviews_link)
+
+                logger.info(f"LLM нашел ссылку на отзывы: {reviews_link}")
+                return reviews_link
+
+            logger.warning("LLM не смог найти ссылку на отзывы")
+            return None
+
+        except Exception as e:
+            logger.error(f"Ошибка поиска ссылки на отзывы: {e}")
+            return None
+
+    async def _find_reviews_link_with_llm(
+        self, product_url: str, html: str
+    ) -> Optional[str]:
+        """Анализирует HTML с помощью LLM для поиска ссылки на отзывы"""
+
+        prompt = f"""
+Проанализируй HTML страницы товара и найди ссылку на отзывы.
+
+URL страницы: {product_url}
+
+HTML код:
+{html}
+
+ЗАДАЧА:
+Найди ссылку, которая ведет на страницу отзывов о товаре. Это может быть:
+- Ссылка содержащая "/reviews/"
+- Ссылка содержащая "/review/"
+- Ссылка содержащая "/comments/"
+- Ссылка содержащая "/feedback/"
+- Ссылка в тексте которой упоминаются "отзывы", "комментарии", "reviews"
+
+ИНСТРУКЦИИ:
+1. Внимательно изучи HTML код
+2. Найди все ссылки (элементы <a href="...">)
+3. Определи какая из них ведет на отзывы
+4. Верни ТОЛЬКО относительный или абсолютный URL ссылки
+5. Если ссылка не найдена, верни "NOT_FOUND"
+
+ВАЖНО:
+- Ищи именно ссылку на отзывы о данном товаре
+- НЕ выдумывай ссылки - используй только те, что есть в HTML
+- Возвращай только сам URL без дополнительного текста
+
+Ответ (только URL или NOT_FOUND):
+"""
+
+        try:
+            llm = get_llm()
+            response = await llm.ask([{"role": "user", "content": prompt}])
+
+            logger.info(f"LLM ответ для поиска ссылки на отзывы: {response}")
+
+            # Очищаем ответ от лишних символов
+            response = response.strip()
+
+            if response == "NOT_FOUND" or not response:
+                return None
+
+            # Убираем возможные markdown символы
+            response = response.replace("`", "").replace('"', "").replace("'", "")
+
+            # Проверяем что это похоже на URL
+            if response.startswith("http") or response.startswith("/"):
+                return response
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Ошибка LLM анализа для поиска ссылки на отзывы: {e}")
+            return None
+
+    async def _load_more_reviews(self, page: Page, max_reviews: int) -> None:
+        """Загружает дополнительные отзывы на странице (пагинация, прокрутка)"""
+        try:
+            logger.info(f"Попытка загрузить больше отзывов (цель: {max_reviews})...")
+
+            # Метод 1: Прокрутка страницы для ленивой загрузки
+            for scroll_attempt in range(
+                self.marketplace_config.scroll_attempts
+            ):  # Используем настройку из конфига
+                current_height = await page.evaluate("document.body.scrollHeight")
+
+                # Прокручиваем вниз
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(2)
+
+                # Проверяем, изменилась ли высота страницы (загрузился ли новый контент)
+                new_height = await page.evaluate("document.body.scrollHeight")
+
+                if new_height == current_height:
+                    logger.info(
+                        f"Прокрутка {scroll_attempt + 1}: Контент не загружается"
+                    )
+                    break
+                else:
+                    logger.info(
+                        f"Прокрутка {scroll_attempt + 1}: Загружен новый контент"
+                    )
+
+            # Метод 2: Поиск и клик по кнопкам "Показать еще" / "Загрузить еще"
+            load_more_selectors = [
+                'button:has-text("Показать еще")',
+                'button:has-text("Загрузить еще")',
+                'button:has-text("Еще отзывы")',
+                'button:has-text("Show more")',
+                'button:has-text("Load more")',
+                'a:has-text("Показать еще")',
+                'a:has-text("Загрузить еще")',
+                '[data-testid*="load-more"]',
+                '[data-testid*="show-more"]',
+                ".load-more",
+                ".show-more",
+            ]
+
+            for selector in load_more_selectors:
+                try:
+                    # Ищем кнопку "показать еще"
+                    load_more_button = await page.query_selector(selector)
+                    if load_more_button:
+                        # Проверяем, что кнопка видима и доступна
+                        is_visible = await load_more_button.is_visible()
+                        if is_visible:
+                            logger.info(f"Найдена кнопка загрузки: {selector}")
+
+                            # Кликаем несколько раз для загрузки большего количества отзывов
+                            for click_attempt in range(
+                                self.marketplace_config.load_more_clicks
+                            ):
+                                try:
+                                    await load_more_button.click()
+                                    await asyncio.sleep(3)  # Ждем загрузки
+
+                                    # Проверяем, что кнопка все еще доступна
+                                    if not await load_more_button.is_visible():
+                                        logger.info(
+                                            "Кнопка исчезла - все отзывы загружены"
+                                        )
+                                        break
+
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Ошибка клика по кнопке (попытка {click_attempt + 1}): {e}"
+                                    )
+                                    break
+
+                            break  # Найдли и использовали кнопку, прекращаем поиск
+
+                except Exception as e:
+                    # Игнорируем ошибки селекторов
+                    continue
+
+            # Метод 3: Поиск пагинации
+            pagination_selectors = [
+                'a:has-text("Следующая")',
+                'a:has-text("Next")',
+                'a:has-text(">")',
+                ".pagination a[href]",
+                '[data-testid*="next"]',
+                ".next-page",
+            ]
+
+            for selector in pagination_selectors:
+                try:
+                    next_button = await page.query_selector(selector)
+                    if next_button and await next_button.is_visible():
+                        logger.info(f"Найдена пагинация: {selector}")
+
+                        # Переходим на следующие страницы
+                        for page_attempt in range(
+                            self.marketplace_config.pagination_pages
+                        ):
+                            try:
+                                await next_button.click()
+                                await page.wait_for_load_state(
+                                    "networkidle", timeout=10000
+                                )
+                                await asyncio.sleep(2)
+
+                                # Обновляем ссылку на кнопку следующей страницы
+                                next_button = await page.query_selector(selector)
+                                if (
+                                    not next_button
+                                    or not await next_button.is_visible()
+                                ):
+                                    logger.info("Достигнута последняя страница")
+                                    break
+
+                            except Exception as e:
+                                logger.warning(
+                                    f"Ошибка перехода на страницу {page_attempt + 1}: {e}"
+                                )
+                                break
+
+                        break  # Нашли пагинацию, прекращаем поиск
+
+                except Exception:
+                    continue
+
+            # Финальная прокрутка для обеспечения загрузки всего контента
+            await page.evaluate("window.scrollTo(0, 0)")
+            await asyncio.sleep(1)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(2)
+
+            logger.info("Завершена попытка загрузки дополнительных отзывов")
+
+        except Exception as e:
+            logger.warning(f"Ошибка при загрузке дополнительных отзывов: {e}")
+
+    async def _extract_reviews_improved(
+        self, page: Page, max_reviews: int = 50
+    ) -> List[str]:
+        """Универсальное извлечение отзывов с помощью LLM"""
+        try:
+            logger.info(
+                f"Начинаем извлечение отзывов с помощью LLM (лимит: {max_reviews})..."
+            )
+
+            # Получаем HTML контент страницы отзывов
+            html_content = await page.content()
+            cleaned_html = self._clean_html_for_analysis(html_content)
+
+            # Анализируем HTML с помощью LLM для извлечения отзывов
+            reviews = await self._extract_reviews_with_llm(
+                page.url, cleaned_html, max_reviews
+            )
+
+            logger.info(f"LLM извлек {len(reviews)} отзывов")
+            return reviews
+
+        except Exception as e:
+            logger.error(f"Ошибка извлечения отзывов: {e}")
+            return []
+
+    async def _extract_reviews_with_llm(
+        self, reviews_url: str, html: str, max_reviews: int = 50
+    ) -> List[str]:
+        """Универсальное извлечение отзывов с помощью LLM"""
+
+        prompt = f"""
+Проанализируй HTML страницы отзывов и извлеки все отзывы.
+
+URL страницы: {reviews_url}
+
+HTML код:
+{html}
+
+ЗАДАЧА:
+Найди и извлеки все отзывы пользователей на странице. Для каждого отзыва попытайся найти:
+- Автор отзыва (имя пользователя)
+- Рейтинг/оценка (звезды, баллы)
+- Дата написания отзыва
+- Текст отзыва
+
+ИНСТРУКЦИИ:
+1. Внимательно изучи HTML код
+2. Найди блоки, содержащие отзывы пользователей
+3. Извлеки информацию из каждого отзыва
+4. Верни данные в формате JSON массива
+
+ФОРМАТ ОТВЕТА:
+Верни ТОЛЬКО JSON массив объектов в формате:
+[
+  {{
+    "author": "Имя автора или 'Аноним'",
+    "rating": "Рейтинг или null",
+    "date": "Дата или null",
+    "text": "Текст отзыва"
+  }}
+]
+
+ ВАЖНО:
+ - Включай только настоящие отзывы пользователей, НЕ описания товара
+ - Текст отзыва должен быть не менее 10 символов
+ - Если данные не найдены, используй null для rating/date и "Аноним" для author
+ - Максимум {max_reviews} отзывов (извлекай все найденные отзывы до этого лимита)
+ - НЕ выдумывай отзывы - используй только те, что есть в HTML
+ - Возвращай ТОЛЬКО JSON, никакого дополнительного текста
+
+Ответ:
+"""
+
+        try:
+            llm = get_llm()
+            response = await llm.ask([{"role": "user", "content": prompt}])
+
+            logger.info(
+                f"LLM ответ для извлечения отзывов (первые 200 символов): {response[:200]}..."
+            )
+
+            # Очищаем ответ и извлекаем JSON
+            response = response.strip()
+
+            # Ищем JSON в ответе
+            import re
+
+            json_match = re.search(r"\[.*\]", response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                try:
+                    import json
+
+                    reviews_data = json.loads(json_str)
+
+                    # Конвертируем в нужный формат
+                    formatted_reviews = []
+                    for review in reviews_data:
+                        if isinstance(review, dict) and "text" in review:
+                            # Проверяем что текст достаточно длинный
+                            text = review.get("text", "").strip()
+                            if len(text) >= 10:
+                                formatted_review = (
+                                    f"👤 {review.get('author', 'Аноним')}"
+                                )
+
+                                if review.get("rating"):
+                                    formatted_review += f"\n⭐ {review['rating']}"
+
+                                if review.get("date"):
+                                    formatted_review += f"\n📅 {review['date']}"
+
+                                # Ограничиваем длину текста
+                                max_text_length = 400
+                                if len(text) > max_text_length:
+                                    text = text[:max_text_length] + "..."
+
+                                formatted_review += f"\n💬 {text}"
+                                formatted_reviews.append(formatted_review)
+
+                    logger.info(f"Успешно обработано {len(formatted_reviews)} отзывов")
+                    return formatted_reviews
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Ошибка парсинга JSON отзывов: {e}")
+                    return []
+            else:
+                logger.warning("JSON не найден в ответе LLM")
+                return []
+
+        except Exception as e:
+            logger.error(f"Ошибка LLM анализа отзывов: {e}")
+            return []
 
     async def _extract_product_basic_info(self, element, domain: str) -> Optional[str]:
         """Basic product information extraction"""

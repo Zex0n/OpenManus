@@ -95,6 +95,21 @@ temperature = 0.0                          # Controls randomness for vision mode
 #timeout = 300
 #network_enabled = true
 
+# Marketplace configuration
+[marketplace]
+# Default number of reviews to extract
+default_max_reviews = 50
+# Maximum number of reviews that can be extracted in one request
+max_reviews_limit = 500
+# Default number of product search results
+default_max_results = 10
+# Browser settings for marketplace analysis
+headless_browser = false          # Show browser for debugging
+page_load_timeout = 30000         # Page load timeout in milliseconds
+scroll_attempts = 5               # Number of scroll attempts for lazy loading
+load_more_clicks = 3              # Number of clicks on "load more" buttons
+pagination_pages = 3              # Maximum pages to navigate through pagination
+
 # MCP (Model Context Protocol) configuration
 [mcp]
 server_reference = "app.mcp.server" # default server module reference

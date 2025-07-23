@@ -152,6 +152,37 @@ class MCPSettings(BaseModel):
             raise ValueError(f"Failed to load MCP server config: {e}")
 
 
+class MarketplaceSettings(BaseModel):
+    """Configuration for marketplace analyzer"""
+
+    default_max_reviews: int = Field(
+        default=50, description="Default number of reviews to extract"
+    )
+    max_reviews_limit: int = Field(
+        default=500,
+        description="Maximum number of reviews that can be extracted in one request",
+    )
+    default_max_results: int = Field(
+        default=10, description="Default number of product search results"
+    )
+    headless_browser: bool = Field(
+        default=False,
+        description="Run browser in headless mode for marketplace analysis",
+    )
+    page_load_timeout: int = Field(
+        default=30000, description="Page load timeout in milliseconds"
+    )
+    scroll_attempts: int = Field(
+        default=5, description="Number of scroll attempts for lazy loading"
+    )
+    load_more_clicks: int = Field(
+        default=3, description="Number of clicks on 'load more' buttons"
+    )
+    pagination_pages: int = Field(
+        default=3, description="Maximum pages to navigate through pagination"
+    )
+
+
 class AppConfig(BaseModel):
     llm: Dict[str, LLMSettings]
     sandbox: Optional[SandboxSettings] = Field(
@@ -164,6 +195,9 @@ class AppConfig(BaseModel):
         None, description="Search configuration"
     )
     mcp_config: Optional[MCPSettings] = Field(None, description="MCP configuration")
+    marketplace_config: Optional[MarketplaceSettings] = Field(
+        None, description="Marketplace configuration"
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -281,6 +315,12 @@ class Config:
         else:
             run_flow_settings = RunflowSettings()
 
+        marketplace_config = raw_config.get("marketplace", {})
+        if marketplace_config:
+            marketplace_settings = MarketplaceSettings(**marketplace_config)
+        else:
+            marketplace_settings = MarketplaceSettings()
+
         config_dict = {
             "llm": {
                 "default": default_settings,
@@ -294,6 +334,7 @@ class Config:
             "search_config": search_settings,
             "mcp_config": mcp_settings,
             "run_flow_config": run_flow_settings,
+            "marketplace_config": marketplace_settings,
         }
 
         self._config = AppConfig(**config_dict)
@@ -323,6 +364,11 @@ class Config:
     def run_flow_config(self) -> RunflowSettings:
         """Get the Run Flow configuration"""
         return self._config.run_flow_config
+
+    @property
+    def marketplace_config(self) -> MarketplaceSettings:
+        """Get the Marketplace configuration"""
+        return self._config.marketplace_config
 
     @property
     def workspace_root(self) -> Path:
