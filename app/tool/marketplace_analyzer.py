@@ -148,11 +148,19 @@ Features:
             if action == "analyze_page":
                 if not url:
                     return ToolResult(error="URL is required for page analysis")
+                try:
+                    self._normalize_url(url)  # Validate URL format
+                except ValueError as e:
+                    return ToolResult(error=f"Invalid URL: {str(e)}")
                 return await self._analyze_page_structure(url)
 
             elif action == "search_products":
                 if not url or not query:
                     return ToolResult(error="URL and query are required for search")
+                try:
+                    self._normalize_url(url)  # Validate URL format
+                except ValueError as e:
+                    return ToolResult(error=f"Invalid URL: {str(e)}")
                 return await self._search_products(url, query, max_results, filters)
 
             elif action == "get_product_info":
@@ -160,6 +168,10 @@ Features:
                     return ToolResult(
                         error="Product URL is required for information retrieval"
                     )
+                try:
+                    self._normalize_url(product_url)  # Validate URL format
+                except ValueError as e:
+                    return ToolResult(error=f"Invalid product URL: {str(e)}")
                 return await self._get_product_info(product_url)
 
             elif action == "get_reviews":
@@ -167,6 +179,10 @@ Features:
                     return ToolResult(
                         error="Product URL is required for review retrieval"
                     )
+                try:
+                    self._normalize_url(product_url)  # Validate URL format
+                except ValueError as e:
+                    return ToolResult(error=f"Invalid product URL: {str(e)}")
                 return await self._get_reviews(product_url, max_reviews)
 
             elif action == "apply_filters":
@@ -196,6 +212,24 @@ Features:
             raise RuntimeError("Failed to initialize browser")
 
         return self._page
+
+    def _normalize_url(self, url: str) -> str:
+        """Normalizes URL by adding protocol if missing"""
+        if not url:
+            raise ValueError("URL cannot be empty")
+
+        url = url.strip()
+
+        # If URL already contains protocol, return as is
+        if url.startswith(("http://", "https://")):
+            return url
+
+        # If URL starts with www or contains dot, add https://
+        if url.startswith("www.") or "." in url:
+            return f"https://{url}"
+
+        # In other cases also add https://
+        return f"https://{url}"
 
     async def _init_browser(self):
         """Initializes browser with anti-detection settings"""
@@ -235,6 +269,60 @@ Features:
 
         self._page = await self._context.new_page()
 
+    async def _ensure_page_loaded(self, page: Page, timeout: int = 15000) -> bool:
+        """Smart page readiness check with multiple methods"""
+        try:
+            logger.info("Checking page readiness...")
+
+            # Method 1: Quick basic readiness check
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=timeout // 3)
+                logger.info("DOM loaded")
+            except:
+                logger.warning("DOM wait timeout")
+
+            # Method 2: Wait for networkidle with short timeout
+            try:
+                await page.wait_for_load_state("networkidle", timeout=timeout // 3)
+                logger.info("Network idle")
+            except:
+                logger.info("Networkidle not available, continuing without it")
+
+            # Method 3: Check for basic elements
+            await asyncio.sleep(2)  # Basic pause for JS
+
+            # Method 4: Check content stability
+            try:
+                initial_height = await page.evaluate("document.body.scrollHeight")
+                await asyncio.sleep(3)
+                final_height = await page.evaluate("document.body.scrollHeight")
+
+                if abs(initial_height - final_height) < 100:
+                    logger.info("Content is stable")
+                    return True
+                else:
+                    logger.info("Content is still changing, giving additional time")
+                    await asyncio.sleep(2)
+
+            except Exception as e:
+                logger.warning(f"Stability check error: {e}")
+
+            # Method 5: Check JavaScript readiness
+            try:
+                ready_state = await page.evaluate("document.readyState")
+                if ready_state == "complete":
+                    logger.info("JavaScript ready")
+                    return True
+            except:
+                pass
+
+            logger.info("Page is considered ready")
+            return True
+
+        except Exception as e:
+            logger.warning(f"Page readiness check error: {e}")
+            return False
+
     async def _analyze_page_structure(self, url: str) -> ToolResult:
         """Analyzes page structure using LLM"""
         logger.info(f"Analyzing page structure: {url}")
@@ -242,21 +330,22 @@ Features:
         page = await self._ensure_browser_ready()
 
         try:
-            # Navigate to page with extended timeout
+            # Normalize URL - add protocol if missing
+            normalized_url = self._normalize_url(url)
+            logger.info(f"Normalized URL: {normalized_url}")
+
+            # Navigate to page with improved loading
+            logger.info("Переходим на страницу...")
             await page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=self.marketplace_config.page_load_timeout + 15000,
+                normalized_url,
+                wait_until="domcontentloaded",  # Только базовая загрузка
+                timeout=20000,
             )
-            logger.info("Page loaded, waiting for JavaScript content...")
 
-            # Wait for network to settle
-            await page.wait_for_load_state(
-                "networkidle", timeout=self.marketplace_config.page_load_timeout
-            )
-            await asyncio.sleep(5)
+            # Умная проверка готовности
+            await self._ensure_page_loaded(page, 15000)
 
-            # Scroll to trigger lazy loading and wait for content
+            # Дополнительная прокрутка для ленивой загрузки
             await self._ensure_content_loaded(page)
 
             # Get HTML content
@@ -305,17 +394,41 @@ Features:
             return ToolResult(error=f"Analysis error: {str(e)}")
 
     async def _ensure_content_loaded(self, page: Page) -> None:
-        """Ensures JavaScript content is fully loaded"""
+        """Ensures JavaScript content is fully loaded with improved detection"""
         try:
-            # Scroll down and up to trigger lazy loading
-            await page.evaluate("window.scrollTo(0, 1000)")
-            await asyncio.sleep(2)
-            await page.evaluate("window.scrollTo(0, 2000)")
-            await asyncio.sleep(2)
-            await page.evaluate("window.scrollTo(0, 0)")
-            await asyncio.sleep(2)
+            logger.info("Checking JavaScript content loading...")
 
-            # Wait for common marketplace elements to appear
+            # Smart scrolling with change detection
+            for scroll_attempt in range(3):  # Reduced number of attempts
+                try:
+                    initial_height = await page.evaluate("document.body.scrollHeight")
+
+                    # Scroll gradually
+                    await page.evaluate(
+                        "window.scrollTo(0, Math.floor(window.innerHeight))"
+                    )
+                    await asyncio.sleep(1)
+                    await page.evaluate(
+                        "window.scrollTo(0, Math.floor(window.innerHeight * 2))"
+                    )
+                    await asyncio.sleep(1)
+                    await page.evaluate("window.scrollTo(0, 0)")
+                    await asyncio.sleep(1)
+
+                    # Check for changes
+                    new_height = await page.evaluate("document.body.scrollHeight")
+
+                    if abs(new_height - initial_height) < 50:  # Content is stable
+                        logger.info(f"Scroll {scroll_attempt + 1}: Content is stable")
+                        break
+                    else:
+                        logger.info(f"Scroll {scroll_attempt + 1}: Content has changed")
+
+                except Exception as e:
+                    logger.warning(f"Scroll error {scroll_attempt + 1}: {e}")
+                    break
+
+            # Wait for common marketplace elements with reduced timeout
             common_selectors = [
                 "[data-widget]",
                 ".product-card",
@@ -327,19 +440,26 @@ Features:
                 "input[placeholder*='search']",
             ]
 
+            found_element = False
             for selector in common_selectors:
                 try:
-                    await page.wait_for_selector(selector, timeout=5000)
+                    await page.wait_for_selector(
+                        selector, timeout=3000
+                    )  # Reduced timeout
                     logger.info(f"Found element: {selector}")
+                    found_element = True
                     break
                 except:
                     continue
 
-            # Additional wait for any pending requests
-            await asyncio.sleep(3)
+            if not found_element:
+                logger.info("Specific elements not found, but continuing")
+
+            # Final pause
+            await asyncio.sleep(2)
 
         except Exception as e:
-            logger.warning(f"Content loading check failed: {e}")
+            logger.warning(f"Content check error: {e}")
 
     def _clean_html_for_analysis(self, html: str) -> str:
         """Cleans HTML for LLM analysis with improved preservation of structure"""
@@ -622,13 +742,16 @@ IMPORTANT:
         """Performs product search"""
         logger.info(f"Searching products: {query} on {url}")
 
+        # Normalize URL
+        normalized_url = self._normalize_url(url)
+
         # Get structure for this domain
-        domain = urlparse(url).netloc
+        domain = urlparse(normalized_url).netloc
         structure = self._analyzed_structures.get(domain)
 
         if not structure:
             # Analyze structure first
-            analysis_result = await self._analyze_page_structure(url)
+            analysis_result = await self._analyze_page_structure(normalized_url)
             if "Error" in analysis_result.output:
                 return analysis_result
             structure = self._analyzed_structures.get(domain)
@@ -642,8 +765,10 @@ IMPORTANT:
             # Navigate to page if needed
             current_url = page.url
             if not current_url or urlparse(current_url).netloc != domain:
-                await page.goto(url, wait_until="networkidle", timeout=30000)
-                await asyncio.sleep(2)
+                await page.goto(
+                    normalized_url, wait_until="domcontentloaded", timeout=20000
+                )
+                await self._ensure_page_loaded(page, 15000)
 
             # Find search field and enter query
             if not structure.search.search_input_selector:
@@ -679,8 +804,7 @@ IMPORTANT:
 
             # Wait for search results to load
             logger.info("Waiting for search results to load...")
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            await asyncio.sleep(5)  # Additional time for JavaScript content loading
+            await self._ensure_page_loaded(page, 15000)
 
             # Ensure search results are loaded
             await self._ensure_content_loaded(page)
@@ -714,7 +838,7 @@ IMPORTANT:
                 search_structure = structure
 
             # Additional wait for OZON (known to require more time)
-            if "ozon" in domain.lower():
+            if domain and "ozon" in domain.lower():
                 logger.info("Additional wait for OZON...")
                 await asyncio.sleep(3)
 
@@ -890,7 +1014,7 @@ IMPORTANT:
                 price_selectors.append(structure.product.price_selector)
 
             # Special selectors for OZON (from user memory)
-            if "ozon" in structure.base_url.lower():
+            if structure.base_url and "ozon" in structure.base_url.lower():
                 price_selectors.extend(
                     [
                         "span.c35_3_1-a1.tsHeadline500Medium.c35_3_1-b1.c35_3_1-a6",
@@ -1056,13 +1180,16 @@ IMPORTANT:
         """Gets detailed product information"""
         logger.info(f"Getting product information: {product_url}")
 
+        # Normalize URL
+        normalized_url = self._normalize_url(product_url)
+
         # Determine structure for domain
-        domain = urlparse(product_url).netloc
+        domain = urlparse(normalized_url).netloc
         structure = self._analyzed_structures.get(domain)
 
         if not structure:
             # Analyze structure
-            analysis_result = await self._analyze_page_structure(product_url)
+            analysis_result = await self._analyze_page_structure(normalized_url)
             if "Error" in analysis_result.output:
                 return analysis_result
             structure = self._analyzed_structures.get(domain)
@@ -1074,11 +1201,11 @@ IMPORTANT:
 
         try:
             await page.goto(
-                product_url,
-                wait_until="networkidle",
+                normalized_url,
+                wait_until="domcontentloaded",
                 timeout=self.marketplace_config.page_load_timeout,
             )
-            await asyncio.sleep(3)
+            await self._ensure_page_loaded(page, 15000)
 
             # Extract product information
             product_info = await self._extract_product_page_info(page, structure)
@@ -1134,7 +1261,7 @@ IMPORTANT:
                 price_selectors.append(structure.product_page.price_selector)
 
             # Special selectors for OZON (from user memory)
-            if "ozon" in structure.base_url.lower():
+            if structure.base_url and "ozon" in structure.base_url.lower():
                 price_selectors.extend(
                     [
                         "span.c35_3_1-a1.tsHeadline500Medium.c35_3_1-b1.c35_3_1-a6",
@@ -1232,21 +1359,24 @@ IMPORTANT:
         """Gets product reviews"""
         logger.info(f"Getting reviews for product: {product_url}")
 
+        # Normalize URL
+        normalized_url = self._normalize_url(product_url)
+
         page = await self._ensure_browser_ready()
 
         try:
             await page.goto(
-                product_url,
-                wait_until="networkidle",
+                normalized_url,
+                wait_until="domcontentloaded",
                 timeout=self.marketplace_config.page_load_timeout,
             )
-            await asyncio.sleep(3)
+            await self._ensure_page_loaded(page, 15000)
 
             # Прокручиваем страницу для загрузки всех элементов
             await self._ensure_content_loaded(page)
 
             # Находим ссылку на отзывы, используя улучшенную логику
-            reviews_url = await self._find_reviews_link(page, product_url)
+            reviews_url = await self._find_reviews_link(page, normalized_url)
 
             if not reviews_url:
                 return ToolResult(error="Reviews link not found on product page")
@@ -1256,10 +1386,10 @@ IMPORTANT:
             # Переходим на страницу отзывов
             await page.goto(
                 reviews_url,
-                wait_until="networkidle",
+                wait_until="domcontentloaded",
                 timeout=self.marketplace_config.page_load_timeout,
             )
-            await asyncio.sleep(5)  # Больше времени для загрузки отзывов
+            await self._ensure_page_loaded(page, 15000)
 
             # Прокручиваем страницу отзывов для загрузки контента
             await self._ensure_content_loaded(page)
@@ -1454,8 +1584,7 @@ IMPORTANT:
             await self._apply_filters_with_structure(page, structure, filters)
 
             # Wait for results update
-            await page.wait_for_load_state("networkidle", timeout=15000)
-            await asyncio.sleep(2)
+            await self._ensure_page_loaded(page, 15000)
 
             return ToolResult(output="Filters applied successfully")
 
@@ -1481,7 +1610,7 @@ IMPORTANT:
                 )
                 if next_button:
                     await next_button.click()
-                    await page.wait_for_load_state("networkidle", timeout=15000)
+                    await self._ensure_page_loaded(page, 15000)
                     return ToolResult(output=f"Navigated to page {page_number}")
 
             return ToolResult(error="Navigation to specified page is not possible")
@@ -1544,7 +1673,7 @@ IMPORTANT:
             logger.info("Attempting alternative product extraction...")
 
             # Specific selectors for OZON
-            if "ozon" in domain.lower():
+            if domain and "ozon" in domain.lower():
                 alternative_selectors = [
                     # Main OZON product containers
                     "[data-widget='searchResultsV2'] > div > div",
@@ -1608,126 +1737,122 @@ IMPORTANT:
         return products
 
     async def _find_reviews_link(self, page: Page, product_url: str) -> Optional[str]:
-        """Находит ссылку на отзывы на странице товара используя LLM"""
+        """Finds reviews link on product page using LLM"""
         try:
-            logger.info("Поиск ссылки на отзывы с помощью LLM...")
+            logger.info("Looking for reviews link using LLM...")
 
-            # Получаем HTML контент страницы
+            # Get page HTML content
             html_content = await page.content()
             cleaned_html = self._clean_html_for_analysis(html_content)
 
-            # Анализируем HTML с помощью LLM для поиска ссылки на отзывы
+            # Analyze HTML with LLM to find reviews link
             reviews_link = await self._find_reviews_link_with_llm(
                 product_url, cleaned_html
             )
 
             if reviews_link:
-                # Проверяем, что ссылка валидна и делаем её абсолютной
+                # Check that link is valid and make it absolute
                 if reviews_link.startswith("/"):
                     reviews_link = urljoin(product_url, reviews_link)
                 elif not reviews_link.startswith("http"):
                     reviews_link = urljoin(product_url, reviews_link)
 
-                logger.info(f"LLM нашел ссылку на отзывы: {reviews_link}")
+                logger.info(f"LLM found reviews link: {reviews_link}")
                 return reviews_link
 
-            logger.warning("LLM не смог найти ссылку на отзывы")
+            logger.warning("LLM could not find reviews link")
             return None
 
         except Exception as e:
-            logger.error(f"Ошибка поиска ссылки на отзывы: {e}")
+            logger.error(f"Error finding reviews link: {e}")
             return None
 
     async def _find_reviews_link_with_llm(
         self, product_url: str, html: str
     ) -> Optional[str]:
-        """Анализирует HTML с помощью LLM для поиска ссылки на отзывы"""
+        """Analyzes HTML with LLM to find reviews link"""
 
         prompt = f"""
-Проанализируй HTML страницы товара и найди ссылку на отзывы.
+Analyze the product page HTML and find the reviews link.
 
-URL страницы: {product_url}
+Page URL: {product_url}
 
-HTML код:
+HTML code:
 {html}
 
-ЗАДАЧА:
-Найди ссылку, которая ведет на страницу отзывов о товаре. Это может быть:
-- Ссылка содержащая "/reviews/"
-- Ссылка содержащая "/review/"
-- Ссылка содержащая "/comments/"
-- Ссылка содержащая "/feedback/"
-- Ссылка в тексте которой упоминаются "отзывы", "комментарии", "reviews"
+TASK:
+Find the link that leads to the product reviews page. It could be:
+- Link containing "/reviews/"
+- Link containing "/review/"
+- Link containing "/comments/"
+- Link containing "/feedback/"
+- Link with text mentioning "reviews", "comments", "feedback"
 
-ИНСТРУКЦИИ:
-1. Внимательно изучи HTML код
-2. Найди все ссылки (элементы <a href="...">)
-3. Определи какая из них ведет на отзывы
-4. Верни ТОЛЬКО относительный или абсолютный URL ссылки
-5. Если ссылка не найдена, верни "NOT_FOUND"
+INSTRUCTIONS:
+1. Carefully examine the HTML code
+2. Find all links (elements <a href="...">)
+3. Determine which one leads to reviews
+4. Return ONLY relative or absolute URL of the link
+5. If link not found, return "NOT_FOUND"
 
-ВАЖНО:
-- Ищи именно ссылку на отзывы о данном товаре
-- НЕ выдумывай ссылки - используй только те, что есть в HTML
-- Возвращай только сам URL без дополнительного текста
+IMPORTANT:
+- Look specifically for link to reviews of this product
+- DO NOT make up links - use only those present in HTML
+- Return only the URL without additional text
 
-Ответ (только URL или NOT_FOUND):
+Response (URL only or NOT_FOUND):
 """
 
         try:
             llm = get_llm()
             response = await llm.ask([{"role": "user", "content": prompt}])
 
-            logger.info(f"LLM ответ для поиска ссылки на отзывы: {response}")
+            logger.info(f"LLM response for reviews link search: {response}")
 
-            # Очищаем ответ от лишних символов
+            # Clean response from extra symbols
             response = response.strip()
 
             if response == "NOT_FOUND" or not response:
                 return None
 
-            # Убираем возможные markdown символы
+            # Remove possible markdown symbols
             response = response.replace("`", "").replace('"', "").replace("'", "")
 
-            # Проверяем что это похоже на URL
+            # Check if it looks like a URL
             if response.startswith("http") or response.startswith("/"):
                 return response
 
             return None
 
         except Exception as e:
-            logger.error(f"Ошибка LLM анализа для поиска ссылки на отзывы: {e}")
+            logger.error(f"LLM analysis error for reviews link search: {e}")
             return None
 
     async def _load_more_reviews(self, page: Page, max_reviews: int) -> None:
-        """Загружает дополнительные отзывы на странице (пагинация, прокрутка)"""
+        """Loads additional reviews on the page (pagination, scrolling)"""
         try:
-            logger.info(f"Попытка загрузить больше отзывов (цель: {max_reviews})...")
+            logger.info(f"Attempting to load more reviews (target: {max_reviews})...")
 
-            # Метод 1: Прокрутка страницы для ленивой загрузки
+            # Method 1: Page scrolling for lazy loading
             for scroll_attempt in range(
                 self.marketplace_config.scroll_attempts
-            ):  # Используем настройку из конфига
+            ):  # Using config setting
                 current_height = await page.evaluate("document.body.scrollHeight")
 
-                # Прокручиваем вниз
+                # Scroll down
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(2)
 
-                # Проверяем, изменилась ли высота страницы (загрузился ли новый контент)
+                # Check if page height changed (new content loaded)
                 new_height = await page.evaluate("document.body.scrollHeight")
 
                 if new_height == current_height:
-                    logger.info(
-                        f"Прокрутка {scroll_attempt + 1}: Контент не загружается"
-                    )
+                    logger.info(f"Scroll {scroll_attempt + 1}: No new content loading")
                     break
                 else:
-                    logger.info(
-                        f"Прокрутка {scroll_attempt + 1}: Загружен новый контент"
-                    )
+                    logger.info(f"Scroll {scroll_attempt + 1}: New content loaded")
 
-            # Метод 2: Поиск и клик по кнопкам "Показать еще" / "Загрузить еще"
+            # Method 2: Find and click "Show more" / "Load more" buttons
             load_more_selectors = [
                 'button:has-text("Показать еще")',
                 'button:has-text("Загрузить еще")',
@@ -1744,44 +1869,43 @@ HTML код:
 
             for selector in load_more_selectors:
                 try:
-                    # Ищем кнопку "показать еще"
+                    # Find "show more" button
                     load_more_button = await page.query_selector(selector)
                     if load_more_button:
-                        # Проверяем, что кнопка видима и доступна
+                        # Check if button is visible and available
                         is_visible = await load_more_button.is_visible()
                         if is_visible:
-                            logger.info(f"Найдена кнопка загрузки: {selector}")
+                            logger.info(f"Found load more button: {selector}")
 
-                            # Кликаем несколько раз для загрузки большего количества отзывов
+                            # Click several times to load more reviews
                             for click_attempt in range(
                                 self.marketplace_config.load_more_clicks
                             ):
                                 try:
                                     await load_more_button.click()
-                                    await asyncio.sleep(3)  # Ждем загрузки
+                                    await asyncio.sleep(3)  # Wait for loading
 
-                                    # Проверяем, что кнопка все еще доступна
+                                    # Check if button is still available
                                     if not await load_more_button.is_visible():
                                         logger.info(
-                                            "Кнопка исчезла - все отзывы загружены"
+                                            "Button disappeared - all reviews loaded"
                                         )
                                         break
 
                                 except Exception as e:
                                     logger.warning(
-                                        f"Ошибка клика по кнопке (попытка {click_attempt + 1}): {e}"
+                                        f"Button click error (attempt {click_attempt + 1}): {e}"
                                     )
                                     break
 
-                            break  # Найдли и использовали кнопку, прекращаем поиск
+                            break  # Found and used button, stop searching
 
                 except Exception as e:
-                    # Игнорируем ошибки селекторов
+                    # Ignore selector errors
                     continue
 
-            # Метод 3: Поиск пагинации
+            # Method 3: Find pagination
             pagination_selectors = [
-                'a:has-text("Следующая")',
                 'a:has-text("Next")',
                 'a:has-text(">")',
                 ".pagination a[href]",
@@ -1793,121 +1917,118 @@ HTML код:
                 try:
                     next_button = await page.query_selector(selector)
                     if next_button and await next_button.is_visible():
-                        logger.info(f"Найдена пагинация: {selector}")
+                        logger.info(f"Found pagination: {selector}")
 
-                        # Переходим на следующие страницы
+                        # Go to next pages
                         for page_attempt in range(
                             self.marketplace_config.pagination_pages
                         ):
                             try:
                                 await next_button.click()
-                                await page.wait_for_load_state(
-                                    "networkidle", timeout=10000
-                                )
-                                await asyncio.sleep(2)
+                                await self._ensure_page_loaded(page, 10000)
 
-                                # Обновляем ссылку на кнопку следующей страницы
+                                # Update next page button reference
                                 next_button = await page.query_selector(selector)
                                 if (
                                     not next_button
                                     or not await next_button.is_visible()
                                 ):
-                                    logger.info("Достигнута последняя страница")
+                                    logger.info("Reached last page")
                                     break
 
                             except Exception as e:
                                 logger.warning(
-                                    f"Ошибка перехода на страницу {page_attempt + 1}: {e}"
+                                    f"Error navigating to page {page_attempt + 1}: {e}"
                                 )
                                 break
 
-                        break  # Нашли пагинацию, прекращаем поиск
+                        break  # Found pagination, stop searching
 
                 except Exception:
                     continue
 
-            # Финальная прокрутка для обеспечения загрузки всего контента
+            # Final scroll to ensure all content is loaded
             await page.evaluate("window.scrollTo(0, 0)")
             await asyncio.sleep(1)
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await asyncio.sleep(2)
 
-            logger.info("Завершена попытка загрузки дополнительных отзывов")
+            logger.info("Completed attempt to load additional reviews")
 
         except Exception as e:
-            logger.warning(f"Ошибка при загрузке дополнительных отзывов: {e}")
+            logger.warning(f"Error loading additional reviews: {e}")
 
     async def _extract_reviews_improved(
         self, page: Page, max_reviews: int = 50
     ) -> List[str]:
-        """Универсальное извлечение отзывов с помощью LLM"""
+        """Universal review extraction using LLM"""
         try:
             logger.info(
-                f"Начинаем извлечение отзывов с помощью LLM (лимит: {max_reviews})..."
+                f"Starting review extraction using LLM (limit: {max_reviews})..."
             )
 
-            # Получаем HTML контент страницы отзывов
+            # Get reviews page HTML content
             html_content = await page.content()
             cleaned_html = self._clean_html_for_analysis(html_content)
 
-            # Анализируем HTML с помощью LLM для извлечения отзывов
+            # Analyze HTML with LLM to extract reviews
             reviews = await self._extract_reviews_with_llm(
                 page.url, cleaned_html, max_reviews
             )
 
-            logger.info(f"LLM извлек {len(reviews)} отзывов")
+            logger.info(f"LLM extracted {len(reviews)} reviews")
             return reviews
 
         except Exception as e:
-            logger.error(f"Ошибка извлечения отзывов: {e}")
+            logger.error(f"Review extraction error: {e}")
             return []
 
     async def _extract_reviews_with_llm(
         self, reviews_url: str, html: str, max_reviews: int = 50
     ) -> List[str]:
-        """Универсальное извлечение отзывов с помощью LLM"""
+        """Universal review extraction using LLM"""
 
         prompt = f"""
-Проанализируй HTML страницы отзывов и извлеки все отзывы.
+Analyze the reviews page HTML and extract all reviews.
 
-URL страницы: {reviews_url}
+Page URL: {reviews_url}
 
-HTML код:
+HTML code:
 {html}
 
-ЗАДАЧА:
-Найди и извлеки все отзывы пользователей на странице. Для каждого отзыва попытайся найти:
-- Автор отзыва (имя пользователя)
-- Рейтинг/оценка (звезды, баллы)
-- Дата написания отзыва
-- Текст отзыва
+TASK:
+Find and extract all user reviews on the page. For each review try to find:
+- Review author (username)
+- Rating/score (stars, points)
+- Review date
+- Review text
 
-ИНСТРУКЦИИ:
-1. Внимательно изучи HTML код
-2. Найди блоки, содержащие отзывы пользователей
-3. Извлеки информацию из каждого отзыва
-4. Верни данные в формате JSON массива
+INSTRUCTIONS:
+1. Carefully examine the HTML code
+2. Find blocks containing user reviews
+3. Extract information from each review
+4. Return data in JSON array format
 
-ФОРМАТ ОТВЕТА:
-Верни ТОЛЬКО JSON массив объектов в формате:
+RESPONSE FORMAT:
+Return ONLY JSON array of objects in format:
 [
   {{
-    "author": "Имя автора или 'Аноним'",
-    "rating": "Рейтинг или null",
-    "date": "Дата или null",
-    "text": "Текст отзыва"
+    "author": "Author name or 'Anonymous'",
+    "rating": "Rating or null",
+    "date": "Date or null",
+    "text": "Review text"
   }}
 ]
 
- ВАЖНО:
- - Включай только настоящие отзывы пользователей, НЕ описания товара
- - Текст отзыва должен быть не менее 10 символов
- - Если данные не найдены, используй null для rating/date и "Аноним" для author
- - Максимум {max_reviews} отзывов (извлекай все найденные отзывы до этого лимита)
- - НЕ выдумывай отзывы - используй только те, что есть в HTML
- - Возвращай ТОЛЬКО JSON, никакого дополнительного текста
+IMPORTANT:
+- Include only real user reviews, NOT product descriptions
+- Review text must be at least 10 characters long
+- If data not found, use null for rating/date and "Anonymous" for author
+- Maximum {max_reviews} reviews (extract all found reviews up to this limit)
+- DO NOT make up reviews - use only those present in HTML
+- Return ONLY JSON, no additional text
 
-Ответ:
+Response:
 """
 
         try:
@@ -1915,32 +2036,31 @@ HTML код:
             response = await llm.ask([{"role": "user", "content": prompt}])
 
             logger.info(
-                f"LLM ответ для извлечения отзывов (первые 200 символов): {response[:200]}..."
+                f"LLM response for review extraction (first 200 characters): {response[:200]}..."
             )
 
-            # Очищаем ответ и извлекаем JSON
+            # Clean response and extract JSON
             response = response.strip()
 
-            # Ищем JSON в ответе
+            # Look for JSON in response
             import re
 
             json_match = re.search(r"\[.*\]", response, re.DOTALL)
             if json_match:
-                json_str = json_match.group()
                 try:
                     import json
 
-                    reviews_data = json.loads(json_str)
+                    reviews_data = json.loads(json_match.group())
 
-                    # Конвертируем в нужный формат
+                    # Convert to required format
                     formatted_reviews = []
                     for review in reviews_data:
                         if isinstance(review, dict) and "text" in review:
-                            # Проверяем что текст достаточно длинный
+                            # Check that text is long enough
                             text = review.get("text", "").strip()
                             if len(text) >= 10:
                                 formatted_review = (
-                                    f"👤 {review.get('author', 'Аноним')}"
+                                    f"👤 {review.get('author', 'Anonymous')}"
                                 )
 
                                 if review.get("rating"):
@@ -1949,7 +2069,7 @@ HTML код:
                                 if review.get("date"):
                                     formatted_review += f"\n📅 {review['date']}"
 
-                                # Ограничиваем длину текста
+                                # Limit text length
                                 max_text_length = 400
                                 if len(text) > max_text_length:
                                     text = text[:max_text_length] + "..."
@@ -1957,18 +2077,20 @@ HTML код:
                                 formatted_review += f"\n💬 {text}"
                                 formatted_reviews.append(formatted_review)
 
-                    logger.info(f"Успешно обработано {len(formatted_reviews)} отзывов")
+                    logger.info(
+                        f"Successfully processed {len(formatted_reviews)} reviews"
+                    )
                     return formatted_reviews
 
                 except json.JSONDecodeError as e:
-                    logger.error(f"Ошибка парсинга JSON отзывов: {e}")
+                    logger.error(f"Error parsing reviews JSON: {e}")
                     return []
             else:
-                logger.warning("JSON не найден в ответе LLM")
+                logger.warning("JSON not found in LLM response")
                 return []
 
         except Exception as e:
-            logger.error(f"Ошибка LLM анализа отзывов: {e}")
+            logger.error(f"LLM review analysis error: {e}")
             return []
 
     async def _extract_product_basic_info(self, element, domain: str) -> Optional[str]:
@@ -1998,7 +2120,7 @@ HTML код:
             price_selectors = ["span", "div", ".price", "[data-testid*='price']"]
 
             # Special selectors for OZON
-            if "ozon" in domain.lower():
+            if domain and "ozon" in domain.lower():
                 price_selectors.insert(
                     0, "span[style*='background-image'][style*='linear-gradient']"
                 )
