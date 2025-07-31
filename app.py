@@ -43,23 +43,13 @@ def get_db():
         conn.close()
 
 
-def init_db():
-    with get_db() as db:
-        db.execute(
-            """
-        CREATE TABLE IF NOT EXISTS tasks (
-            id TEXT PRIMARY KEY,
-            prompt TEXT,
-            created_at TEXT,
-            status TEXT,
-            steps TEXT,
-            result TEXT
-        )
-        """
-        )
-
-
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def startup_event():
+    init_db()
+
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
@@ -431,6 +421,9 @@ async def login(data: dict = Body(...)):
 
 if __name__ == "__main__":
     import uvicorn
+
+    # Инициализируем базу данных при запуске
+    init_db()
 
     config = load_config()
     print(config)

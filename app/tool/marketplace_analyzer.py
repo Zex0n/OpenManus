@@ -32,9 +32,12 @@ Features:
 - Product search by query
 - Page structure analysis through LLM
 - Product information extraction
-- Review collection
+- Review collection (automatically checks reviews for all found products)
 - Working with filters
-- Page navigation"""
+- Page navigation
+
+IMPORTANT: When user requests product search with review analysis,
+automatically check reviews for ALL found products, not just one."""
 
     # Configuration fields
     config: Config = Field(default_factory=Config)
@@ -69,7 +72,7 @@ Features:
             },
             "query": {
                 "type": "string",
-                "description": "Search query for products",
+                "description": "Search query for products. If query contains review-related keywords (отзыв, review, качество, quality, etc.), automatically check reviews for all found products.",
             },
             "product_url": {
                 "type": "string",
@@ -161,6 +164,13 @@ Features:
                     self._normalize_url(url)  # Validate URL format
                 except ValueError as e:
                     return ToolResult(error=f"Invalid URL: {str(e)}")
+
+                # Log if review analysis will be performed
+                if self._should_check_reviews_for_query(query):
+                    logger.info(
+                        f"Query contains review keywords - will check reviews for all found products: {query}"
+                    )
+
                 return await self._search_products(url, query, max_results, filters)
 
             elif action == "get_product_info":
@@ -580,6 +590,12 @@ ANALYSIS RULES:
 - Pay attention to marketplace-specific patterns (Ozon, Wildberries, etc.)
 - Modern SPAs often use component-based class names and data attributes
 
+IMPORTANT FOR REVIEW ANALYSIS:
+- When user searches for products and mentions reviews/ratings/quality,
+  automatically check reviews for ALL found products, not just one
+- This provides comprehensive analysis for better decision making
+- Review analysis should be applied to each product in the search results
+
 IMPORTANT: Study the actual HTML structure provided. Look for:
 - [data-widget] attributes (common in Ozon)
 - [data-testid] attributes (common in modern React apps)
@@ -858,28 +874,53 @@ IMPORTANT:
             logger.info(
                 f"Attempting product extraction with structure: {search_structure.product.container_selector}"
             )
-            products = await self._extract_products_with_structure(
+            extracted_products = await self._extract_products_with_structure(
                 page, search_structure, max_results
             )
 
-            if not products:
+            if not extracted_products:
                 # If no products found, try alternative extraction methods
                 logger.warning(
                     "Standard extraction yielded no results, trying alternative methods..."
                 )
-                products = await self._extract_products_alternative_methods(
+                extracted_products = await self._extract_products_alternative_methods(
                     page, domain, max_results
                 )
 
-            if not products:
+            if not extracted_products:
                 return ToolResult(
                     output="No products found. Page structure may be different or no results for query."
                 )
 
-            return ToolResult(
-                output=f"Found products: {len(products)}\n\n"
-                + "\n".join([f"{i+1}. {product}" for i, product in enumerate(products)])
-            )
+            # Check if user wants review analysis (based on query context)
+            should_check_reviews = self._should_check_reviews_for_query(query)
+
+            if should_check_reviews:
+                logger.info(
+                    "User requested review analysis - checking reviews for all found products"
+                )
+                products_with_reviews = await self._add_reviews_to_products(
+                    extracted_products, domain
+                )
+                return ToolResult(
+                    output=f"Found products with reviews: {len(products_with_reviews)}\n\n"
+                    + "\n".join(
+                        [
+                            f"{i+1}. {product}"
+                            for i, product in enumerate(products_with_reviews)
+                        ]
+                    )
+                )
+            else:
+                return ToolResult(
+                    output=f"Found products: {len(extracted_products)}\n\n"
+                    + "\n".join(
+                        [
+                            f"{i+1}. {product}"
+                            for i, product in enumerate(extracted_products)
+                        ]
+                    )
+                )
 
         except Exception as e:
             logger.error(f"Product search error: {e}")
@@ -1046,7 +1087,7 @@ IMPORTANT:
                             price = (
                                 price_text.replace("\u2009", " ")
                                 .replace("&thinsp;", " ")
-                                .replace("\u00A0", " ")
+                                .replace("\u00a0", " ")
                                 .strip()
                             )
                             if price:
@@ -1290,7 +1331,7 @@ IMPORTANT:
                             price = (
                                 price_text.replace("\u2009", " ")
                                 .replace("&thinsp;", " ")
-                                .replace("\u00A0", " ")
+                                .replace("\u00a0", " ")
                                 .strip()
                             )
                             if price:
@@ -2093,6 +2134,141 @@ Response:
             logger.error(f"LLM review analysis error: {e}")
             return []
 
+    def _should_check_reviews_for_query(self, query: str) -> bool:
+        """Determines if reviews should be checked based on query content"""
+        if not query:
+            return False
+
+        query_lower = query.lower()
+
+        # Keywords that indicate user wants review analysis
+        review_keywords = [
+            "отзыв",
+            "отзывы",
+            "review",
+            "reviews",
+            "мнение",
+            "мнения",
+            "оценка",
+            "оценки",
+            "rating",
+            "ratings",
+            "рейтинг",
+            "рейтинги",
+            "качество",
+            "quality",
+            "надежность",
+            "reliability",
+            "доверие",
+            "trust",
+            "проверить",
+            "check",
+            "анализ",
+            "analysis",
+            "сравнить",
+            "compare",
+            "лучший",
+            "best",
+            "хороший",
+            "good",
+            "плохой",
+            "bad",
+            "популярный",
+            "popular",
+        ]
+
+        # Check if query contains review-related keywords
+        for keyword in review_keywords:
+            if keyword in query_lower:
+                return True
+
+        return False
+
+    async def _add_reviews_to_products(
+        self, products: List[str], domain: str
+    ) -> List[str]:
+        """Adds review information to all found products"""
+        products_with_reviews = []
+
+        try:
+            logger.info(f"Adding reviews to {len(products)} products...")
+
+            for i, product_info in enumerate(products):
+                try:
+                    # Extract product link from product info
+                    product_link = self._extract_product_link_from_info(product_info)
+
+                    if product_link:
+                        # Make absolute URL if needed
+                        if product_link.startswith("/"):
+                            product_link = f"https://{domain}{product_link}"
+                        elif not product_link.startswith("http"):
+                            product_link = f"https://{domain}/{product_link}"
+
+                        logger.info(
+                            f"Checking reviews for product {i+1}/{len(products)}: {product_link}"
+                        )
+
+                        # Get reviews for this product
+                        reviews_result = await self._get_reviews(
+                            product_link, max_reviews=5
+                        )  # Limit to 5 reviews per product
+
+                        if (
+                            reviews_result.output
+                            and "Found reviews:" in reviews_result.output
+                        ):
+                            # Add reviews to product info
+                            product_with_reviews = (
+                                f"{product_info}\n\n📝 ОТЗЫВЫ:\n{reviews_result.output}"
+                            )
+                            products_with_reviews.append(product_with_reviews)
+                        else:
+                            # No reviews found, add product as is
+                            products_with_reviews.append(
+                                f"{product_info}\n\n📝 ОТЗЫВЫ: Отзывы не найдены"
+                            )
+                    else:
+                        # No link found, add product as is
+                        products_with_reviews.append(product_info)
+
+                except Exception as e:
+                    logger.warning(f"Error adding reviews to product {i+1}: {e}")
+                    # Add product without reviews on error
+                    products_with_reviews.append(product_info)
+
+                # Small delay between requests to avoid overwhelming the server
+                await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Error adding reviews to products: {e}")
+            # Return original products if review addition fails
+            return products
+
+        return products_with_reviews
+
+    def _extract_product_link_from_info(self, product_info: str) -> Optional[str]:
+        """Extracts product link from product information string"""
+        try:
+            # Look for link pattern in product info
+            import re
+
+            link_match = re.search(r"🔗 (https?://[^\s\n]+)", product_info)
+            if link_match:
+                return link_match.group(1)
+
+            # Also check for relative links
+            relative_link_match = re.search(r"🔗 (/[^\s\n]+)", product_info)
+            if relative_link_match:
+                # This would need domain to make absolute, but we don't have it here
+                # Return as is and let the calling function handle it
+                return relative_link_match.group(1)
+
+        except Exception as e:
+            logger.warning(f"Error extracting product link: {e}")
+
+        return None
+
     async def _extract_product_basic_info(self, element, domain: str) -> Optional[str]:
         """Basic product information extraction"""
         try:
@@ -2146,7 +2322,7 @@ Response:
                             price = (
                                 price_text.replace("\u2009", " ")
                                 .replace("&thinsp;", " ")
-                                .replace("\u00A0", " ")
+                                .replace("\u00a0", " ")
                                 .strip()
                             )
                             break
