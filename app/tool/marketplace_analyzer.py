@@ -345,17 +345,17 @@ automatically check reviews for ALL found products, not just one."""
             logger.info(f"Normalized URL: {normalized_url}")
 
             # Navigate to page with improved loading
-            logger.info("Переходим на страницу...")
+            logger.info("Navigating to page...")
             await page.goto(
                 normalized_url,
-                wait_until="domcontentloaded",  # Только базовая загрузка
+                wait_until="domcontentloaded",  # Only basic loading
                 timeout=20000,
             )
 
-            # Умная проверка готовности
+            # Smart readiness check
             await self._ensure_page_loaded(page, 15000)
 
-            # Дополнительная прокрутка для ленивой загрузки
+            # Additional scrolling for lazy loading
             await self._ensure_content_loaded(page)
 
             # Get HTML content
@@ -1413,10 +1413,10 @@ IMPORTANT:
             )
             await self._ensure_page_loaded(page, 15000)
 
-            # Прокручиваем страницу для загрузки всех элементов
+            # Scroll page to load all elements
             await self._ensure_content_loaded(page)
 
-            # Находим ссылку на отзывы, используя улучшенную логику
+            # Find reviews link using improved logic
             reviews_url = await self._find_reviews_link(page, normalized_url)
 
             if not reviews_url:
@@ -1424,7 +1424,7 @@ IMPORTANT:
 
             logger.info(f"Found reviews URL: {reviews_url}")
 
-            # Переходим на страницу отзывов
+            # Navigate to reviews page
             await page.goto(
                 reviews_url,
                 wait_until="domcontentloaded",
@@ -1432,16 +1432,16 @@ IMPORTANT:
             )
             await self._ensure_page_loaded(page, 15000)
 
-            # Прокручиваем страницу отзывов для загрузки контента
+            # Scroll reviews page to load content
             await self._ensure_content_loaded(page)
 
-            # Загружаем дополнительные отзывы если их много
+            # Load additional reviews if there are many
             await self._load_more_reviews(page, max_reviews)
 
-            # Дополнительное ожидание для JavaScript-рендеринга отзывов
+            # Additional wait for JavaScript rendering of reviews
             await asyncio.sleep(3)
 
-            # Извлекаем отзывы используя улучшенную логику
+            # Extract reviews using improved logic
             reviews = await self._extract_reviews_improved(page, max_reviews)
 
             if not reviews:
