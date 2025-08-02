@@ -6,7 +6,7 @@ import threading
 import tomllib
 import uuid
 import webbrowser
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from functools import partial
 from json import dumps
@@ -43,12 +43,15 @@ def get_db():
         conn.close()
 
 
-app = FastAPI()
-
-
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     init_db()
+    yield
+    # Shutdown (if needed)
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -80,6 +83,7 @@ class TaskManager:
     def __init__(self):
         self.tasks = {}
         self.queues = {}
+        self._current_task_id = None  # Track current task for ask_human
 
     def create_task(self, prompt: str) -> Task:
         task_id = str(uuid.uuid4())
@@ -166,6 +170,7 @@ from app.agent.manus import Manus
 async def run_task(task_id: str, prompt: str):
     try:
         task_manager.tasks[task_id].status = "running"
+        task_manager._current_task_id = task_id  # Set current task for ask_human
 
         agent = Manus(
             name="Manus",
@@ -219,11 +224,21 @@ async def run_task(task_id: str, prompt: str):
         sse_handler = SSELogHandler(task_id)
         logger.add(sse_handler)
 
+        # Initialize ask_human tool with task manager
+        from app.tool.ask_human import AskHuman
+
+        AskHuman.set_task_manager(task_manager)
+        print(f"DEBUG: TaskManager установлен для ask_human, task_id: {task_id}")
+
         result = await agent.run(prompt)
         await task_manager.update_task_step(task_id, 1, result, "result")
         await task_manager.complete_task(task_id)
     except Exception as e:
         await task_manager.fail_task(task_id, str(e))
+    finally:
+        # Clear current task
+        if task_manager._current_task_id == task_id:
+            task_manager._current_task_id = None
 
 
 @app.get("/tasks/{task_id}/events")
@@ -257,7 +272,7 @@ async def task_events(task_id: str):
                     if task:
                         yield f"event: status\ndata: {dumps({'type': 'status', 'status': task.status, 'steps': task.steps})}\n\n"
                     yield f"event: {event['type']}\ndata: {formatted_event}\n\n"
-                elif event["type"] in ["think", "tool", "act", "run"]:
+                elif event["type"] in ["think", "tool", "act", "run", "ask_human"]:
                     yield f"event: {event['type']}\ndata: {formatted_event}\n\n"
                 else:
                     yield f"event: {event['type']}\ndata: {formatted_event}\n\n"
@@ -284,7 +299,7 @@ async def task_events(task_id: str):
 @app.get("/tasks")
 async def get_tasks():
     db_tasks = get_all_tasks()
-    # steps/result могут быть сериализованы как строки, декодируем
+    # decorate steps/result
     for t in db_tasks:
         try:
             t["steps"] = json.loads(t["steps"]) if t["steps"] else []
@@ -407,6 +422,30 @@ def load_config():
         return {"host": "localhost", "port": 5172}
 
 
+@app.post("/tasks/{task_id}/respond")
+async def respond_to_human_request(task_id: str, data: dict = Body(...)):
+    """Handle user response to ask_human requests."""
+    request_id = data.get("request_id")
+    response = data.get("response")
+
+    if not request_id or response is None:
+        raise HTTPException(
+            status_code=400, detail="request_id and response are required"
+        )
+
+    # Import AskHuman and provide the response
+    from app.tool.ask_human import AskHuman
+
+    success = await AskHuman.provide_response(request_id, response)
+
+    if success:
+        return {"success": True, "message": "Response delivered"}
+    else:
+        raise HTTPException(
+            status_code=404, detail="Request not found or already completed"
+        )
+
+
 @app.post("/login")
 async def login(data: dict = Body(...)):
     password = data.get("password")
@@ -422,7 +461,6 @@ async def login(data: dict = Body(...)):
 if __name__ == "__main__":
     import uvicorn
 
-    # Инициализируем базу данных при запуске
     init_db()
 
     config = load_config()

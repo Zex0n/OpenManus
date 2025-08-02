@@ -221,6 +221,23 @@ function setupSSE(taskId) {
             eventSource.addEventListener(type, (event) => handleEvent(event, type));
         });
 
+        // Special handler for ask_human events
+        eventSource.addEventListener('ask_human', (event) => {
+            clearInterval(heartbeatTimer);
+            try {
+                const data = JSON.parse(event.data);
+                container.querySelector('.loading')?.remove();
+                container.classList.add('active');
+
+                const stepContainer = ensureStepContainer(container);
+                const humanRequestElement = createHumanRequestElement(data, taskId);
+                stepContainer.appendChild(humanRequestElement);
+                autoScroll(stepContainer);
+            } catch (e) {
+                console.error('Error handling ask_human event:', e);
+            }
+        });
+
         eventSource.addEventListener('complete', (event) => {
             clearInterval(heartbeatTimer);
             try {
@@ -516,7 +533,8 @@ function getEventIcon(eventType) {
         'error': '❌',
         'complete': '✅',
         'log': '📝',
-        'run': '⚙️'
+        'run': '⚙️',
+        'ask_human': '💬'
     };
     return icons[eventType] || 'ℹ️';
 }
@@ -530,7 +548,8 @@ function getEventLabel(eventType) {
         'error': 'Error',
         'complete': 'Complete',
         'log': 'Log',
-        'run': 'Running'
+        'run': 'Running',
+        'ask_human': 'Question for User'
     };
     return labels[eventType] || 'Info';
 }
@@ -712,4 +731,443 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function isConfigRequired() {
     return false;
+}
+
+function createHumanRequestElement(data, taskId) {
+    // Сначала добавляем обычный элемент в лог для истории
+    const logElement = document.createElement('div');
+    logElement.className = 'step-item ask_human';
+
+    const question = typeof data.result === 'object' ? data.result.question : data.result;
+    const requestId = typeof data.result === 'object' ? data.result.request_id : null;
+
+    if (!requestId) {
+        console.error('No request_id found in ask_human data:', data);
+        logElement.innerHTML = `
+            <div class="log-line">
+                <span class="log-prefix">💬 [${new Date().toLocaleTimeString()}] Question for User:</span>
+                <pre>Error: No request ID found</pre>
+            </div>
+        `;
+        return logElement;
+    }
+
+    // Добавляем элемент в лог
+    logElement.innerHTML = `
+        <div class="log-line">
+            <span class="log-prefix">💬 [${new Date().toLocaleTimeString()}] Question for User:</span>
+            <div class="question-content">
+                <pre>${question}</pre>
+                <em style="color: #666; font-size: 0.9em;">Ожидается ответ пользователя...</em>
+            </div>
+        </div>
+    `;
+
+    // Создаем модальное окно
+    showAskHumanModal(question, requestId, taskId);
+
+    return logElement;
+}
+
+function showAskHumanModal(question, requestId, taskId) {
+    // Удаляем существующие модальные окна ask_human
+    const existingModal = document.getElementById('ask-human-modal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+
+    const responseId = `response_${requestId}`;
+
+    // Создаем модальное окно
+    const modal = document.createElement('div');
+    modal.id = 'ask-human-modal';
+    modal.innerHTML = `
+        <div class="ask-human-overlay">
+            <div class="ask-human-modal">
+                <div class="ask-human-header">
+                    <h3>💬 Вопрос от агента</h3>
+                    <div class="ask-human-time">${new Date().toLocaleTimeString()}</div>
+                </div>
+                <div class="ask-human-question">
+                    <div class="question-text">${question}</div>
+                </div>
+                <div class="ask-human-form">
+                    <textarea
+                        id="${responseId}"
+                        placeholder="Введите ваш ответ..."
+                        rows="4"
+                        autofocus
+                    ></textarea>
+                    <div class="ask-human-buttons">
+                        <button
+                            class="btn-primary"
+                            onclick="respondToHumanModal('${taskId}', '${requestId}', '${responseId}')"
+                        >
+                            ✓ Отправить ответ
+                        </button>
+                        <button
+                            class="btn-secondary"
+                            onclick="respondToHumanModal('${taskId}', '${requestId}', '${responseId}', 'skip')"
+                        >
+                            ⏭ Пропустить
+                        </button>
+                    </div>
+                </div>
+                <div class="ask-human-footer">
+                    <small>Агент ожидает ваш ответ для продолжения работы</small>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // Добавляем стили, если их еще нет
+    if (!document.getElementById('ask-human-styles')) {
+        const styles = document.createElement('style');
+        styles.id = 'ask-human-styles';
+        styles.textContent = `
+            .ask-human-overlay {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0, 0, 0, 0.7);
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                z-index: 10000;
+                animation: askHumanFadeIn 0.3s ease-out;
+            }
+
+            .ask-human-modal {
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+                max-width: 600px;
+                width: 90%;
+                max-height: 80vh;
+                overflow-y: auto;
+                animation: askHumanSlideIn 0.3s ease-out;
+            }
+
+            .ask-human-header {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 20px;
+                border-radius: 12px 12px 0 0;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+
+            .ask-human-header h3 {
+                margin: 0;
+                font-size: 1.3em;
+            }
+
+            .ask-human-time {
+                font-size: 0.9em;
+                opacity: 0.9;
+            }
+
+            .ask-human-question {
+                padding: 25px;
+                border-bottom: 1px solid #eee;
+            }
+
+            .question-text {
+                font-size: 1.1em;
+                line-height: 1.6;
+                color: #333;
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 8px;
+                border-left: 4px solid #667eea;
+            }
+
+            .ask-human-form {
+                padding: 25px;
+            }
+
+            .ask-human-form textarea {
+                width: 100%;
+                padding: 12px;
+                border: 2px solid #e9ecef;
+                border-radius: 8px;
+                font-size: 1em;
+                line-height: 1.5;
+                resize: vertical;
+                margin-bottom: 15px;
+                transition: border-color 0.3s ease;
+            }
+
+            .ask-human-form textarea:focus {
+                outline: none;
+                border-color: #667eea;
+                box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            }
+
+            .ask-human-buttons {
+                display: flex;
+                gap: 10px;
+                justify-content: flex-end;
+            }
+
+            .ask-human-buttons button {
+                padding: 12px 24px;
+                border: none;
+                border-radius: 6px;
+                font-size: 1em;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                font-weight: 500;
+            }
+
+            .btn-primary {
+                background: #667eea;
+                color: white;
+            }
+
+            .btn-primary:hover {
+                background: #5a6fd8;
+                transform: translateY(-1px);
+            }
+
+            .btn-secondary {
+                background: #6c757d;
+                color: white;
+            }
+
+            .btn-secondary:hover {
+                background: #545b62;
+                transform: translateY(-1px);
+            }
+
+            .ask-human-footer {
+                padding: 15px 25px;
+                background: #f8f9fa;
+                color: #6c757d;
+                text-align: center;
+                border-radius: 0 0 12px 12px;
+            }
+
+            @keyframes askHumanFadeIn {
+                from { opacity: 0; }
+                to { opacity: 1; }
+            }
+
+            @keyframes askHumanSlideIn {
+                from {
+                    opacity: 0;
+                    transform: translateY(-50px) scale(0.95);
+                }
+                to {
+                    opacity: 1;
+                    transform: translateY(0) scale(1);
+                }
+            }
+
+            @keyframes askHumanFadeOut {
+                from { opacity: 1; }
+                to { opacity: 0; }
+            }
+        `;
+        document.head.appendChild(styles);
+    }
+
+    document.body.appendChild(modal);
+
+    // Фокусируемся на поле ввода
+    setTimeout(() => {
+        const textarea = document.getElementById(responseId);
+        if (textarea) {
+            textarea.focus();
+        }
+    }, 100);
+
+    // Закрытие по Escape
+    const handleEscape = (e) => {
+        if (e.key === 'Escape') {
+            // Можно добавить подтверждение закрытия
+            if (confirm('Закрыть без ответа? (будет считаться как пропуск)')) {
+                respondToHumanModal(taskId, requestId, responseId, 'skip');
+            }
+        }
+    };
+
+    document.addEventListener('keydown', handleEscape);
+    modal.addEventListener('remove', () => {
+        document.removeEventListener('keydown', handleEscape);
+    });
+}
+
+async function respondToHumanModal(taskId, requestId, responseElementId, action = 'respond') {
+    const responseElement = document.getElementById(responseElementId);
+    let response;
+
+    if (action === 'skip') {
+        response = 'User chose to skip this question.';
+    } else {
+        response = responseElement ? responseElement.value.trim() : '';
+        if (!response) {
+            // Показываем ошибку в модальном окне
+            showModalError('Пожалуйста, введите ответ или нажмите "Пропустить"');
+            return;
+        }
+    }
+
+    // Показываем индикатор загрузки
+    showModalLoading();
+
+    try {
+        const result = await fetch(`/tasks/${taskId}/respond`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                request_id: requestId,
+                response: response
+            })
+        });
+
+        if (result.ok) {
+            // Показываем успех и закрываем модальное окно
+            showModalSuccess(action === 'skip' ? '✓ Вопрос пропущен' : '✓ Ответ отправлен успешно');
+
+            // Обновляем элемент в логе
+            updateLogElement(requestId, response, action);
+
+            // Закрываем модальное окно через 1.5 сек
+            setTimeout(() => {
+                closeAskHumanModal();
+            }, 1500);
+
+        } else {
+            const errorData = await result.json();
+            showModalError(`Ошибка: ${errorData.detail || 'Не удалось отправить ответ'}`);
+        }
+    } catch (error) {
+        console.error('Error sending response:', error);
+        showModalError('Ошибка сети. Попробуйте еще раз.');
+    }
+}
+
+// Функция для старого интерфейса (совместимость)
+async function respondToHuman(taskId, requestId, responseElementId, action = 'respond') {
+    const responseElement = document.getElementById(responseElementId);
+    let response;
+
+    if (action === 'skip') {
+        response = 'User chose to skip this question.';
+    } else {
+        response = responseElement ? responseElement.value.trim() : '';
+        if (!response) {
+            alert('Please enter a response or click Skip.');
+            return;
+        }
+    }
+
+    try {
+        const result = await fetch(`/tasks/${taskId}/respond`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                request_id: requestId,
+                response: response
+            })
+        });
+
+        if (result.ok) {
+            // Disable the form after successful response
+            if (responseElement) {
+                responseElement.disabled = true;
+            }
+            const buttons = document.querySelectorAll(`button[onclick*="${requestId}"]`);
+            buttons.forEach(button => {
+                button.disabled = true;
+                button.style.opacity = '0.5';
+            });
+
+            // Add confirmation message
+            const requestContainer = responseElement?.closest('.human-request');
+            if (requestContainer) {
+                const confirmMsg = document.createElement('div');
+                confirmMsg.style.cssText = 'color: green; margin-top: 10px; font-weight: bold;';
+                confirmMsg.textContent = action === 'skip' ? '✓ Question skipped' : '✓ Response sent successfully';
+                requestContainer.appendChild(confirmMsg);
+            }
+        } else {
+            const errorData = await result.json();
+            alert(`Error: ${errorData.detail || 'Failed to send response'}`);
+        }
+    } catch (error) {
+        console.error('Error sending response:', error);
+        alert('Error sending response. Please try again.');
+    }
+}
+
+function showModalError(message) {
+    const modal = document.getElementById('ask-human-modal');
+    if (!modal) return;
+
+    const footer = modal.querySelector('.ask-human-footer');
+    if (footer) {
+        footer.innerHTML = `<div style="color: #dc3545; font-weight: bold;">❌ ${message}</div>`;
+        footer.style.background = '#f8d7da';
+    }
+}
+
+function showModalLoading() {
+    const modal = document.getElementById('ask-human-modal');
+    if (!modal) return;
+
+    const buttons = modal.querySelectorAll('.ask-human-buttons button');
+    buttons.forEach(button => {
+        button.disabled = true;
+        button.style.opacity = '0.5';
+    });
+
+    const footer = modal.querySelector('.ask-human-footer');
+    if (footer) {
+        footer.innerHTML = '<div style="color: #007bff;">⏳ Отправка ответа...</div>';
+        footer.style.background = '#d1ecf1';
+    }
+}
+
+function showModalSuccess(message) {
+    const modal = document.getElementById('ask-human-modal');
+    if (!modal) return;
+
+    const footer = modal.querySelector('.ask-human-footer');
+    if (footer) {
+        footer.innerHTML = `<div style="color: #155724; font-weight: bold;">${message}</div>`;
+        footer.style.background = '#d4edda';
+    }
+}
+
+function updateLogElement(requestId, response, action) {
+    // Находим элемент в логе и обновляем его
+    const logElements = document.querySelectorAll('.step-item.ask_human');
+    for (const element of logElements) {
+        const content = element.textContent;
+        if (content.includes('Ожидается ответ пользователя')) {
+            const responseText = action === 'skip' ? '(пропущен)' : `"${response}"`;
+            element.querySelector('em').textContent = `Ответ пользователя: ${responseText}`;
+            element.querySelector('em').style.color = '#28a745';
+            break;
+        }
+    }
+}
+
+function closeAskHumanModal() {
+    const modal = document.getElementById('ask-human-modal');
+    if (modal) {
+        modal.style.animation = 'askHumanFadeOut 0.3s ease-out forwards';
+        setTimeout(() => {
+            modal.remove();
+        }, 300);
+    }
 }
