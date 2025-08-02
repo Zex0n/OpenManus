@@ -1,4 +1,5 @@
 let currentEventSource = null;
+let currentTaskId = null;
 
 let exampleApiKey = '';
 
@@ -136,6 +137,9 @@ function createTask() {
     container.innerHTML = '<div class="loading">Initializing task...</div>';
     document.getElementById('input-container').classList.add('bottom');
 
+    // Show cancel button
+    showCancelButton();
+
     fetch('/tasks', {
         method: 'POST',
         headers: {
@@ -153,12 +157,14 @@ function createTask() {
             if (!data.task_id) {
                 throw new Error('Invalid task ID');
             }
+            currentTaskId = data.task_id;
             setupSSE(data.task_id);
             loadHistory();
             promptInput.value = '';
         })
         .catch(error => {
             container.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            hideCancelButton();
             console.error('Failed to create task:', error);
         });
 }
@@ -251,6 +257,9 @@ function setupSSE(taskId) {
                     </div>
                 `;
 
+                // Hide cancel button
+                hideCancelButton();
+
                 fetch(`/tasks/${taskId}`)
                     .then(response => response.json())
                     .then(task => {
@@ -262,6 +271,7 @@ function setupSSE(taskId) {
 
                 eventSource.close();
                 currentEventSource = null;
+                currentTaskId = null;
             } catch (e) {
                 console.error('Error handling complete event:', e);
             }
@@ -276,10 +286,45 @@ function setupSSE(taskId) {
                         ❌ Error: ${data.message}
                     </div>
                 `;
+
+                // Hide cancel button
+                hideCancelButton();
+
                 eventSource.close();
                 currentEventSource = null;
+                currentTaskId = null;
             } catch (e) {
                 console.error('Error handling failed:', e);
+            }
+        });
+
+        eventSource.addEventListener('cancelled', (event) => {
+            clearInterval(heartbeatTimer);
+            try {
+                const data = JSON.parse(event.data);
+                container.innerHTML += `
+                    <div class="cancelled">
+                        🚫 Task was cancelled by user
+                    </div>
+                `;
+
+                // Hide cancel button
+                hideCancelButton();
+
+                fetch(`/tasks/${taskId}`)
+                    .then(response => response.json())
+                    .then(task => {
+                        updateTaskStatus(task);
+                    })
+                    .catch(error => {
+                        console.error('Final status update failed:', error);
+                    });
+
+                eventSource.close();
+                currentEventSource = null;
+                currentTaskId = null;
+            } catch (e) {
+                console.error('Error handling cancelled event:', e);
             }
         });
 
@@ -560,6 +605,15 @@ function updateTaskStatus(task) {
 
     if (task.status === 'completed') {
         statusBar.innerHTML = `<span class="status-complete">✅ Task completed</span>`;
+        hideCancelButton();
+
+        if (currentEventSource) {
+            currentEventSource.close();
+            currentEventSource = null;
+        }
+    } else if (task.status === 'cancelled') {
+        statusBar.innerHTML = `<span class="status-cancelled">🚫 Task cancelled</span>`;
+        hideCancelButton();
 
         if (currentEventSource) {
             currentEventSource.close();
@@ -567,11 +621,15 @@ function updateTaskStatus(task) {
         }
     } else if (task.status === 'failed') {
         statusBar.innerHTML = `<span class="status-error">❌ Task failed: ${task.error || 'Unknown error'}</span>`;
+        hideCancelButton();
 
         if (currentEventSource) {
             currentEventSource.close();
             currentEventSource = null;
         }
+    } else if (task.status === 'running') {
+        statusBar.innerHTML = `<span class="status-running">⚙️ Task running: ${task.status}</span>`;
+        showCancelButton();
     } else {
         statusBar.innerHTML = `<span class="status-running">⚙️ Task running: ${task.status}</span>`;
     }
@@ -758,7 +816,7 @@ function createHumanRequestElement(data, taskId) {
             <span class="log-prefix">💬 [${new Date().toLocaleTimeString()}] Question for User:</span>
             <div class="question-content">
                 <pre>${question}</pre>
-                <em style="color: #666; font-size: 0.9em;">Ожидается ответ пользователя...</em>
+                <em style="color: #666; font-size: 0.9em;">Waiting for user response...</em>
             </div>
         </div>
     `;
@@ -785,7 +843,7 @@ function showAskHumanModal(question, requestId, taskId) {
         <div class="ask-human-overlay">
             <div class="ask-human-modal">
                 <div class="ask-human-header">
-                    <h3>💬 Вопрос от агента</h3>
+                    <h3>💬 Question from Agent</h3>
                     <div class="ask-human-time">${new Date().toLocaleTimeString()}</div>
                 </div>
                 <div class="ask-human-question">
@@ -794,7 +852,7 @@ function showAskHumanModal(question, requestId, taskId) {
                 <div class="ask-human-form">
                     <textarea
                         id="${responseId}"
-                        placeholder="Введите ваш ответ..."
+                        placeholder="Enter your response..."
                         rows="4"
                         autofocus
                     ></textarea>
@@ -803,18 +861,18 @@ function showAskHumanModal(question, requestId, taskId) {
                             class="btn-primary"
                             onclick="respondToHumanModal('${taskId}', '${requestId}', '${responseId}')"
                         >
-                            ✓ Отправить ответ
+                            ✓ Send Response
                         </button>
                         <button
                             class="btn-secondary"
                             onclick="respondToHumanModal('${taskId}', '${requestId}', '${responseId}', 'skip')"
                         >
-                            ⏭ Пропустить
+                            ⏭ Skip
                         </button>
                     </div>
                 </div>
                 <div class="ask-human-footer">
-                    <small>Агент ожидает ваш ответ для продолжения работы</small>
+                    <small>Agent is waiting for your response to continue</small>
                 </div>
             </div>
         </div>
@@ -989,7 +1047,7 @@ function showAskHumanModal(question, requestId, taskId) {
     const handleEscape = (e) => {
         if (e.key === 'Escape') {
             // Можно добавить подтверждение закрытия
-            if (confirm('Закрыть без ответа? (будет считаться как пропуск)')) {
+            if (confirm('Close without answering? (will be considered as skip)')) {
                 respondToHumanModal(taskId, requestId, responseId, 'skip');
             }
         }
@@ -1011,7 +1069,7 @@ async function respondToHumanModal(taskId, requestId, responseElementId, action 
         response = responseElement ? responseElement.value.trim() : '';
         if (!response) {
             // Показываем ошибку в модальном окне
-            showModalError('Пожалуйста, введите ответ или нажмите "Пропустить"');
+            showModalError('Please enter a response or click "Skip"');
             return;
         }
     }
@@ -1033,7 +1091,7 @@ async function respondToHumanModal(taskId, requestId, responseElementId, action 
 
         if (result.ok) {
             // Показываем успех и закрываем модальное окно
-            showModalSuccess(action === 'skip' ? '✓ Вопрос пропущен' : '✓ Ответ отправлен успешно');
+            showModalSuccess(action === 'skip' ? '✓ Question skipped' : '✓ Response sent successfully');
 
             // Обновляем элемент в логе
             updateLogElement(requestId, response, action);
@@ -1045,11 +1103,11 @@ async function respondToHumanModal(taskId, requestId, responseElementId, action 
 
         } else {
             const errorData = await result.json();
-            showModalError(`Ошибка: ${errorData.detail || 'Не удалось отправить ответ'}`);
+            showModalError(`Error: ${errorData.detail || 'Failed to send response'}`);
         }
     } catch (error) {
         console.error('Error sending response:', error);
-        showModalError('Ошибка сети. Попробуйте еще раз.');
+        showModalError('Network error. Please try again.');
     }
 }
 
@@ -1132,7 +1190,7 @@ function showModalLoading() {
 
     const footer = modal.querySelector('.ask-human-footer');
     if (footer) {
-        footer.innerHTML = '<div style="color: #007bff;">⏳ Отправка ответа...</div>';
+        footer.innerHTML = '<div style="color: #007bff;">⏳ Sending response...</div>';
         footer.style.background = '#d1ecf1';
     }
 }
@@ -1153,9 +1211,9 @@ function updateLogElement(requestId, response, action) {
     const logElements = document.querySelectorAll('.step-item.ask_human');
     for (const element of logElements) {
         const content = element.textContent;
-        if (content.includes('Ожидается ответ пользователя')) {
-            const responseText = action === 'skip' ? '(пропущен)' : `"${response}"`;
-            element.querySelector('em').textContent = `Ответ пользователя: ${responseText}`;
+        if (content.includes('Waiting for user response')) {
+            const responseText = action === 'skip' ? '(skipped)' : `"${response}"`;
+            element.querySelector('em').textContent = `User response: ${responseText}`;
             element.querySelector('em').style.color = '#28a745';
             break;
         }
@@ -1169,5 +1227,65 @@ function closeAskHumanModal() {
         setTimeout(() => {
             modal.remove();
         }, 300);
+    }
+}
+
+async function cancelTask(taskId) {
+    if (!confirm('Are you sure you want to cancel this task?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/tasks/${taskId}/cancel`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            console.log('Task cancelled successfully:', data);
+
+            // Update UI to show task was cancelled
+            const taskElement = document.querySelector(`[data-task-id="${taskId}"]`);
+            if (taskElement) {
+                const statusElement = taskElement.querySelector('.task-status');
+                if (statusElement) {
+                    statusElement.textContent = 'cancelled';
+                    statusElement.className = 'task-status status-cancelled';
+                }
+
+                // Hide cancel button
+                hideCancelButton();
+            }
+        } else {
+            const error = await response.json();
+            alert(`Task cancellation error: ${error.detail || 'Unknown error'}`);
+        }
+    } catch (error) {
+        console.error('Error cancelling task:', error);
+        alert(`Network error: ${error.message}`);
+    }
+}
+
+function cancelCurrentTask() {
+    if (!currentTaskId) {
+        alert('No active task to cancel');
+        return;
+    }
+
+    cancelTask(currentTaskId);
+}
+
+function showCancelButton() {
+    const cancelBtn = document.getElementById('cancel-task-btn');
+    if (cancelBtn) {
+        cancelBtn.style.display = 'inline-block';
+    }
+}
+
+function hideCancelButton() {
+    const cancelBtn = document.getElementById('cancel-task-btn');
+    if (cancelBtn) {
+        cancelBtn.style.display = 'none';
     }
 }

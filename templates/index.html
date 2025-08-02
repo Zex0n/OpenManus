@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenManus Local Version</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
+
 <body>
     <div class="container">
         <div class="side-panel">
@@ -25,13 +27,12 @@
             </div>
 
             <div id="input-container" class="input-container">
-                <input
-                    type="text"
-                    id="prompt-input"
-                    placeholder="Enter task prompt..."
-                    onkeypress="if(event.keyCode === 13) createTask()"
-                >
+                <input type="text" id="prompt-input" placeholder="Enter task prompt..."
+                    onkeypress="if(event.keyCode === 13) createTask()">
                 <button onclick="createTask()">Create Task</button>
+                <button id="cancel-task-btn" class="cancel-button" onclick="cancelCurrentTask()" style="display: none;">
+                    🚫 Cancel Task
+                </button>
             </div>
         </div>
     </div>
@@ -39,4 +40,5 @@
     <script src="/static/main.js"></script>
     <script src="/static/i18n.js"></script>
 </body>
+
 </html>

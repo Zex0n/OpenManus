@@ -15,7 +15,6 @@ from app.llm import LLM
 from app.tool.base import BaseTool, ToolResult
 from app.tool.web_search import WebSearch
 
-
 _BROWSER_DESCRIPTION = """\
 A powerful browser automation tool that allows interaction with web pages through various actions.
 * This tool provides commands for controlling a browser session, navigating web pages, and extracting information
@@ -141,7 +140,7 @@ class BrowserUseTool(BaseTool, Generic[Context]):
     async def _ensure_browser_initialized(self) -> BrowserContext:
         """Ensure browser and context are initialized."""
         if self.browser is None:
-            browser_config_kwargs = {"headless": False, "disable_security": True}
+            browser_config_kwargs = {"headless": True, "disable_security": True}
 
             if config.browser_config:
                 from browser_use.browser.browser import ProxySettings
@@ -489,7 +488,7 @@ Page content:
             if not ctx:
                 return ToolResult(error="Browser context not initialized")
 
-            state = await ctx.get_state()
+            state = await ctx.get_state(cache_clickable_elements_hashes=True)
 
             # Create a viewport_info dictionary if it doesn't exist
             viewport_height = 0

@@ -84,6 +84,7 @@ class TaskManager:
         self.tasks = {}
         self.queues = {}
         self._current_task_id = None  # Track current task for ask_human
+        self._task_futures = {}  # Track asyncio tasks for cancellation
 
     def create_task(self, prompt: str) -> Task:
         task_id = str(uuid.uuid4())
@@ -131,6 +132,31 @@ class TaskManager:
             await self.queues[task_id].put({"type": "error", "message": error})
             update_task(task_id, status=f"failed: {error}")
 
+    async def cancel_task(self, task_id: str):
+        """Cancel a running task"""
+        if task_id in self.tasks:
+            task = self.tasks[task_id]
+            if task.status == "running":
+                # Cancel the asyncio task
+                if task_id in self._task_futures:
+                    future = self._task_futures[task_id]
+                    if not future.done():
+                        future.cancel()
+
+                # Update task status
+                task.status = "cancelled"
+                await self.queues[task_id].put(
+                    {"type": "cancelled", "message": "Task was cancelled by user"}
+                )
+                update_task(task_id, status="cancelled")
+
+                # Clear current task if it's the one being cancelled
+                if self._current_task_id == task_id:
+                    self._current_task_id = None
+
+                return True
+        return False
+
 
 task_manager = TaskManager()
 
@@ -160,7 +186,9 @@ async def download_file(file_path: str):
 @app.post("/tasks")
 async def create_task(prompt: str = Body(..., embed=True)):
     task = task_manager.create_task(prompt)
-    asyncio.create_task(run_task(task.id, prompt))
+    # Store the asyncio task for cancellation
+    future = asyncio.create_task(run_task(task.id, prompt))
+    task_manager._task_futures[task.id] = future
     return {"task_id": task.id}
 
 
@@ -233,12 +261,22 @@ async def run_task(task_id: str, prompt: str):
         result = await agent.run(prompt)
         await task_manager.update_task_step(task_id, 1, result, "result")
         await task_manager.complete_task(task_id)
+    except asyncio.CancelledError:
+        # Task was cancelled
+        await task_manager.update_task_step(
+            task_id, 0, "Task was cancelled by user", "cancelled"
+        )
+        print(f"Task {task_id} was cancelled")
     except Exception as e:
         await task_manager.fail_task(task_id, str(e))
     finally:
         # Clear current task
         if task_manager._current_task_id == task_id:
             task_manager._current_task_id = None
+
+        # Clean up the future reference
+        if task_id in task_manager._task_futures:
+            del task_manager._task_futures[task_id]
 
 
 @app.get("/tasks/{task_id}/events")
@@ -266,6 +304,9 @@ async def task_events(task_id: str):
                     break
                 elif event["type"] == "error":
                     yield f"event: error\ndata: {formatted_event}\n\n"
+                    break
+                elif event["type"] == "cancelled":
+                    yield f"event: cancelled\ndata: {formatted_event}\n\n"
                     break
                 elif event["type"] == "step":
                     task = task_manager.tasks.get(task_id)
@@ -444,6 +485,17 @@ async def respond_to_human_request(task_id: str, data: dict = Body(...)):
         raise HTTPException(
             status_code=404, detail="Request not found or already completed"
         )
+
+
+@app.post("/tasks/{task_id}/cancel")
+async def cancel_task_endpoint(task_id: str):
+    """Cancel a running task."""
+    success = await task_manager.cancel_task(task_id)
+
+    if success:
+        return {"success": True, "message": "Task cancelled successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Task not found or not running")
 
 
 @app.post("/login")

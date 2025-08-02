@@ -205,6 +205,15 @@ button:hover {
     background-color: var(--primary-hover);
 }
 
+.cancel-button {
+    background-color: #dc3545 !important;
+    margin-left: 10px;
+}
+
+.cancel-button:hover {
+    background-color: #c82333 !important;
+}
+
 .task-item {
     padding: 10px;
     margin-bottom: 10px;
