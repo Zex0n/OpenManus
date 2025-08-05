@@ -203,11 +203,20 @@ function setupSSE(taskId) {
                 container.classList.add('active');
 
                 const stepContainer = ensureStepContainer(container);
+
+                // Убеждаемся, что кнопка создана, если добавляется лог-сообщение
+                if (!stepContainer.querySelector('.log-toggle-btn')) {
+                    createLogToggleButton(stepContainer);
+                }
+
                 const { formattedContent, timestamp } = formatStepContent(data, type);
                 const step = createStepElement(type, formattedContent, timestamp);
 
                 stepContainer.appendChild(step);
                 autoScroll(stepContainer);
+
+                // Обновляем состояние кнопки после добавления нового лога
+                updateLogToggleButtonState(stepContainer);
 
                 fetch(`/tasks/${taskId}`)
                     .then(response => response.json())
@@ -458,8 +467,71 @@ function ensureStepContainer(container) {
     if (!stepContainer) {
         container.innerHTML = '<div class="step-container"></div>';
         stepContainer = container.querySelector('.step-container');
+
+        // Добавляем кнопку переключения логов
+        createLogToggleButton(stepContainer);
     }
     return stepContainer;
+}
+
+function createLogToggleButton(stepContainer) {
+    // Проверяем, нет ли уже кнопки
+    if (stepContainer.querySelector('.log-toggle-btn')) {
+        return;
+    }
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.className = 'log-toggle-btn';
+    toggleBtn.innerHTML = '📝 Показать логи';
+    toggleBtn.onclick = toggleLogVisibility;
+
+    stepContainer.appendChild(toggleBtn);
+}
+
+function toggleLogVisibility() {
+    const stepContainer = document.querySelector('.step-container');
+    const toggleBtn = stepContainer.querySelector('.log-toggle-btn');
+    const logSteps = stepContainer.querySelectorAll('.step-item.log, .step-item[class*="log"]');
+
+    if (logSteps.length === 0) return;
+
+    const areLogsVisible = !logSteps[0]?.classList.contains('hidden');
+
+    logSteps.forEach(step => {
+        if (areLogsVisible) {
+            step.classList.add('hidden');
+        } else {
+            step.classList.remove('hidden');
+        }
+    });
+
+    // Обновляем текст и стиль кнопки
+    updateButtonState(toggleBtn, !areLogsVisible);
+}
+
+function updateLogToggleButtonState(stepContainer) {
+    const toggleBtn = stepContainer.querySelector('.log-toggle-btn');
+    if (!toggleBtn) return;
+
+    const logSteps = stepContainer.querySelectorAll('.step-item.log, .step-item[class*="log"]');
+    const hasLogs = logSteps.length > 0;
+
+    // Показываем или скрываем кнопку в зависимости от наличия логов
+    toggleBtn.style.display = hasLogs ? 'block' : 'none';
+
+    // Проверяем текущее состояние логов для обновления текста кнопки
+    const areLogsVisible = logSteps.length > 0 && !logSteps[0]?.classList.contains('hidden');
+    updateButtonState(toggleBtn, areLogsVisible);
+}
+
+function updateButtonState(toggleBtn, areLogsVisible) {
+    if (areLogsVisible) {
+        toggleBtn.innerHTML = '📝 Скрыть логи';
+        toggleBtn.classList.add('active');
+    } else {
+        toggleBtn.innerHTML = '📝 Показать логи';
+        toggleBtn.classList.remove('active');
+    }
 }
 
 function formatStepContent(data, eventType) {
@@ -546,6 +618,12 @@ function createStepElement(type, content, timestamp) {
         }
     } else {
         step.className = `step-item ${type}`;
+
+        // Скрываем лог-сообщения по умолчанию (проверяем по временной метке)
+        if (type === 'log' || (content && content.includes('Log:'))) {
+            step.classList.add('hidden');
+        }
+
         step.innerHTML = `
             <div class="log-line">
                 <span class="log-prefix">${getEventIcon(type)} [${timestamp}] ${getEventLabel(type)}:</span>
